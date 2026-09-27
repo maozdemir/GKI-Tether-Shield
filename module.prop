@@ -1,6 +1,6 @@
 id=gki_hotspot_shield
-name=GKI Hotspot Shield & TTL/DPI Fixer
+name=GKI Tether Shield & TTL/DPI Fixer
 version=v3.5
 versionCode=350
 author=alperozd
-description=Modern GKI / Android 16 Hotspot bypass suite: Real-time TTL 64 fixer, GoodbyeDPI TLS split, Anti-Bufferbloat fq_codel QoS, Transparent DoH DNS Proxy, In-App Native Zero-Icon Manager & Smart Wi-Fi battery keeper.
+description=Modern GKI / Android 12-16 tethering bypass suite: Real-time TTL 64 fixer, GoodbyeDPI TLS split, Anti-Bufferbloat fq_codel QoS, Transparent DoH DNS Proxy, In-App Native Zero-Icon Manager & Smart Wi-Fi battery keeper.

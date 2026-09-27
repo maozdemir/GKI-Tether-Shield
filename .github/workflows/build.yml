@@ -66,8 +66,11 @@ jobs:
           cp index.html webroot/index.html
           chmod +x nfqttl service.sh customize.sh action.sh uninstall.sh system/bin/ttlshield 2>/dev/null || true
           ZIP_NAME="GKI_Hotspot_Shield_${{ steps.release_info.outputs.TAG }}.zip"
+          ZIP_NAME_NEW="GKI_Tether_Shield_${{ steps.release_info.outputs.TAG }}.zip"
           zip -r9 "$ZIP_NAME" module.prop config.conf service.sh customize.sh action.sh uninstall.sh HotspotShieldManager.apk nfqttl system webroot META-INF
+          cp "$ZIP_NAME" "$ZIP_NAME_NEW"
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          echo "ZIP_NAME_NEW=$ZIP_NAME_NEW" >> $GITHUB_ENV
 
       - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
@@ -78,7 +81,9 @@ jobs:
             ## What's Changed in ${{ steps.release_info.outputs.TAG }}
             
             ${{ steps.release_info.outputs.CHANGELOG }}
-          files: ${{ env.ZIP_NAME }}
+          files: |
+            ${{ env.ZIP_NAME }}
+            ${{ env.ZIP_NAME_NEW }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

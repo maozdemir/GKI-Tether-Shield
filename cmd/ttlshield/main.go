@@ -49,11 +49,28 @@ const (
 	SOL_NETLINK        = 270
 	NETLINK_NO_ENOBUFS = 5
 
-	DEFAULT_CONFIG_PATH = "/data/adb/modules/nfqttl/config.conf"
+	DEFAULT_CONFIG_PATH = "/data/adb/modules/gki_hotspot_shield/config.conf"
 	STATS_PATH          = "/data/local/tmp/ttlfixer_stats.json"
 	WEB_PORT            = 64640
 	DNS_PORT            = 53545
 )
+
+func getConfigPath() string {
+	if _, err := os.Stat("/data/adb/modules/gki_hotspot_shield/config.conf"); err == nil {
+		return "/data/adb/modules/gki_hotspot_shield/config.conf"
+	}
+	if _, err := os.Stat("/data/adb/modules/nfqttl/config.conf"); err == nil {
+		return "/data/adb/modules/nfqttl/config.conf"
+	}
+	return DEFAULT_CONFIG_PATH
+}
+
+func getWebrootFile() string {
+	if _, err := os.Stat("/data/adb/modules/gki_hotspot_shield/webroot/index.html"); err == nil {
+		return "/data/adb/modules/gki_hotspot_shield/webroot/index.html"
+	}
+	return "/data/adb/modules/nfqttl/webroot/index.html"
+}
 
 type Config struct {
 	QueueNum           uint16 `json:"QUEUE_NUM"`
@@ -347,7 +364,7 @@ func startHTTPServer() {
 		if len(webUIHTML) > 0 {
 			w.Write(webUIHTML)
 		} else {
-			http.ServeFile(w, r, "/data/adb/modules/nfqttl/webroot/index.html")
+			http.ServeFile(w, r, getWebrootFile())
 		}
 	})
 
@@ -419,7 +436,7 @@ func startHTTPServer() {
 				}
 			}
 
-			_ = saveConfigToFile(DEFAULT_CONFIG_PATH, cfg)
+			_ = saveConfigToFile(getConfigPath(), cfg)
 			w.Write([]byte(`{"status":"ok"}`))
 		}
 	})
@@ -710,7 +727,7 @@ func main() {
 
 	_ = syscall.Setpriority(syscall.PRIO_PROCESS, 0, -20)
 
-	loadConfig(DEFAULT_CONFIG_PATH)
+	loadConfig(getConfigPath())
 
 	// Start embedded DoH DNS Interceptor
 	startDNSServer()

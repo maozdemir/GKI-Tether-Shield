@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>GKI Hotspot Shield</title>
+  <title>GKI Tether Shield</title>
   <style>
     :root {
       --bg: #0f172a;
@@ -23,8 +23,17 @@
     
     header { display: flex; align-items: center; justify-content: space-between; padding-bottom: 8px; border-bottom: 1px solid var(--card-border); }
     .title { font-size: 1.25rem; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+    .header-badges { display: flex; align-items: center; gap: 6px; }
     .badge { font-size: 0.75rem; padding: 4px 8px; border-radius: 9999px; background: rgba(16, 185, 129, 0.2); color: var(--success); font-weight: 600; }
+    .version-badge { font-size: 0.75rem; padding: 4px 8px; border-radius: 9999px; background: rgba(59, 130, 246, 0.2); color: #60a5fa; font-weight: 600; }
     
+    .update-card { background: linear-gradient(135deg, rgba(59, 130, 246, 0.2), rgba(168, 85, 247, 0.2)); border: 1px solid var(--primary); border-radius: 12px; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; animation: fadeIn 0.4s ease; }
+    .update-info { display: flex; flex-direction: column; gap: 2px; }
+    .update-title { font-size: 0.85rem; font-weight: 700; color: #93c5fd; }
+    .update-desc { font-size: 0.75rem; color: var(--text-muted); }
+    .btn-update { background: var(--primary); color: white; text-decoration: none; padding: 6px 12px; border-radius: 8px; font-size: 0.75rem; font-weight: 600; white-space: nowrap; transition: background 0.2s; }
+    .btn-update:hover { background: var(--primary-hover); }
+
     .stats-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
     .stat-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; }
     .stat-label { font-size: 0.75rem; color: var(--text-muted); font-weight: 500; }
@@ -55,18 +64,39 @@
     .btn-save { background: var(--success); }
     .btn-save:hover { background: #059669; }
     
+    .footer { text-align: center; font-size: 0.75rem; color: var(--text-muted); margin-top: 8px; display: flex; justify-content: center; gap: 12px; }
+    .footer a { color: var(--primary); text-decoration: none; }
+    .footer a:hover { text-decoration: underline; }
+
     .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #334155; color: white; padding: 10px 20px; border-radius: 20px; font-size: 0.85rem; font-weight: 500; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 999; }
     .toast.show { opacity: 1; }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
       <div class="title">
-        <span>🛡️ GKI Hotspot Shield</span>
+        <span>🛡️ GKI Tether Shield</span>
       </div>
-      <div class="badge" id="statusBadge">● Active</div>
+      <div class="header-badges">
+        <span class="version-badge" id="appVersion">v3.5</span>
+        <div class="badge" id="statusBadge">● Active</div>
+      </div>
     </header>
+
+    <!-- Update Notification Card -->
+    <div class="update-card" id="updateCard" style="display: none;">
+      <div class="update-info">
+        <span class="update-title">🎉 Update Available: <b id="updateVersionTag"></b></span>
+        <span class="update-desc">A new version of GKI-Tether-Shield is ready.</span>
+      </div>
+      <a class="btn-update" id="updateDownloadBtn" href="https://github.com/maozdemir/GKI-Tether-Shield/releases/latest" target="_blank">Update Now</a>
+    </div>
 
     <div class="stats-grid">
       <div class="stat-card">
@@ -184,16 +214,40 @@
     </div>
 
     <button class="btn btn-save" onclick="saveConfig()">💾 Save & Apply Settings</button>
+
+    <div class="footer">
+      <a href="https://github.com/maozdemir/GKI-Tether-Shield" target="_blank">GitHub Repository</a>
+      <span>•</span>
+      <a href="https://github.com/maozdemir/GKI-Tether-Shield/releases" target="_blank">Releases & Changelog</a>
+    </div>
   </div>
 
   <div class="toast" id="toast">Settings Saved!</div>
 
   <script>
+    let currentVersionCode = 350;
+
     function showToast(msg) {
       const toast = document.getElementById('toast');
       toast.innerText = msg;
       toast.classList.add('show');
       setTimeout(() => toast.classList.remove('show'), 2000);
+    }
+
+    async function checkForUpdates() {
+      try {
+        const res = await fetch('https://raw.githubusercontent.com/maozdemir/GKI-Tether-Shield/main/update.json?t=' + Date.now());
+        if (res.ok) {
+          const remote = await res.json();
+          if (remote.versionCode && remote.versionCode > currentVersionCode) {
+            document.getElementById('updateVersionTag').innerText = remote.version;
+            if (remote.zipUrl) {
+              document.getElementById('updateDownloadBtn').href = remote.zipUrl;
+            }
+            document.getElementById('updateCard').style.display = 'flex';
+          }
+        }
+      } catch (e) {}
     }
 
     async function fetchStats() {
@@ -205,6 +259,12 @@
           document.getElementById('tcpSplit').innerText = data.tcp_split_packets.toLocaleString();
           document.getElementById('dohQueries').innerText = (data.doh_queries || 0).toLocaleString();
           document.getElementById('dnsCacheHits').innerText = (data.dns_cache_hits || 0).toLocaleString();
+          if (data.version) {
+            document.getElementById('appVersion').innerText = data.version;
+          }
+          if (data.version_code) {
+            currentVersionCode = data.version_code;
+          }
         }
       } catch (e) {}
     }
@@ -256,7 +316,9 @@
 
     loadConfig();
     fetchStats();
+    checkForUpdates();
     setInterval(fetchStats, 2000);
+    setInterval(checkForUpdates, 60000);
   </script>
 </body>
 </html>

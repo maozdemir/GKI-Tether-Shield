@@ -59,6 +59,29 @@ jobs:
         run: |
           GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o nfqttl main.go
 
+      - name: Sync update.json and changelog.md
+        run: |
+          VERSION=$(grep "^version=" module.prop | head -n1 | cut -d'=' -f2 | tr -d '\r')
+          VERSION_CODE=$(grep "^versionCode=" module.prop | head -n1 | cut -d'=' -f2 | tr -d '\r')
+          TAG="${{ steps.release_info.outputs.TAG }}"
+
+          cat <<EOF > update.json
+          {
+            "version": "$VERSION",
+            "versionCode": $VERSION_CODE,
+            "zipUrl": "https://github.com/maozdemir/GKI-Tether-Shield/releases/download/$TAG/GKI_Tether_Shield_$TAG.zip",
+            "changelog": "https://raw.githubusercontent.com/maozdemir/GKI-Tether-Shield/main/changelog.md"
+          }
+          EOF
+
+          git config user.name "Mustafa Alper ÖZDEMİR"
+          git config user.email "ozdemirmus16@itu.edu.tr"
+          if git status --porcelain | grep -qE "update.json|changelog.md"; then
+            git add update.json changelog.md || true
+            git commit -m "Auto-sync update.json and changelog for $TAG [skip ci]" || true
+            git push origin HEAD:main || echo "Push skipped or already up to date"
+          fi
+
       - name: Package Magisk Module ZIP
         run: |
           mkdir -p system/bin webroot
@@ -67,7 +90,7 @@ jobs:
           chmod +x nfqttl service.sh customize.sh action.sh uninstall.sh system/bin/ttlshield 2>/dev/null || true
           ZIP_NAME="GKI_Hotspot_Shield_${{ steps.release_info.outputs.TAG }}.zip"
           ZIP_NAME_NEW="GKI_Tether_Shield_${{ steps.release_info.outputs.TAG }}.zip"
-          zip -r9 "$ZIP_NAME" module.prop config.conf service.sh customize.sh action.sh uninstall.sh HotspotShieldManager.apk nfqttl system webroot META-INF
+          zip -r9 "$ZIP_NAME" module.prop config.conf service.sh customize.sh action.sh uninstall.sh HotspotShieldManager.apk nfqttl system webroot META-INF update.json changelog.md
           cp "$ZIP_NAME" "$ZIP_NAME_NEW"
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           echo "ZIP_NAME_NEW=$ZIP_NAME_NEW" >> $GITHUB_ENV

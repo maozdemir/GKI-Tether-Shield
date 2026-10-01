@@ -59,6 +59,7 @@ Lastly, legacy userspace daemons intercept all packets indiscriminately, creatin
 | **Wi-Fi Latency (Screen Off)** | High jitter and packet drops caused by Wi-Fi power saving | **Locked to low latency** during active hotspot; powersave restored on idle |
 | **BitTorrent & P2P Speed** | Stalls or drops due to userspace queue saturation | **100% In-kernel line rate acceleration** with enlarged conntrack table |
 | **Configuration Interface** | Complex terminal commands or clunky drawer apps | **Zero-Icon Native Manager App** launched directly via Magisk Action button |
+| **Module Updates** | Manual downloading from GitHub & flashing | **1-Click Native Auto-Update** directly in Magisk / KernelSU / APatch / MMRL |
 
 ---
 
@@ -99,6 +100,11 @@ Lastly, legacy userspace daemons intercept all packets indiscriminately, creatin
 ### 6. 📲 Carrier DUN & Entitlement Bypass
 - Automatically resets carrier entitlement flags: `tether_dun_required=0`, `net.tethering.noprovisioning=true`, and `tether_entitlement_check_state=0`.
 - Enforces kernel default TTL values: `net.ipv4.ip_default_ttl=64` and `net.ipv6.conf.all.hop_limit=64`.
+
+### 7. 🔄 Native 1-Click Auto-Update (`update.json`)
+- Fully compliant with **Magisk**, **KernelSU**, **APatch**, and **MMRL** update specifications.
+- Automatically checks for updates and renders a 1-click update button inside your root manager app.
+- Embedded Companion WebUI and native manager dynamically check for updates and notify you when new releases are published.
 
 ---
 

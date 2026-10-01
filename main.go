@@ -53,6 +53,8 @@ const (
 	STATS_PATH          = "/data/local/tmp/ttlfixer_stats.json"
 	WEB_PORT            = 64640
 	DNS_PORT            = 53545
+	MODULE_VERSION      = "v3.5"
+	MODULE_VERSION_CODE = 350
 )
 
 func getConfigPath() string {
@@ -382,6 +384,8 @@ func startHTTPServer() {
 			"tcp_split_enabled": cfg.TcpSplit,
 			"doh_enabled":       cfg.DohEnabled,
 			"doh_provider":      cfg.DohProvider,
+			"version":           MODULE_VERSION,
+			"version_code":      MODULE_VERSION_CODE,
 			"updated_at":        time.Now().Format(time.RFC3339),
 		}
 		json.NewEncoder(w).Encode(stats)

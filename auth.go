@@ -4,7 +4,9 @@ package main
 
 import (
 	"bufio"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
@@ -156,16 +158,54 @@ func (a *writeAuthorizer) allowed(r *http.Request) bool {
 	return isTrustedUID(uid, appID, appKnown)
 }
 
-// createWebUIToken writes a fresh random token to the root-only module dir
-// for action.sh to hand to the browser fallback.
-func createWebUIToken() (string, error) {
-	buf := make([]byte, 24)
+const webUITokenBytes = 24 // hex-encoded: 48 characters
+
+// loadOrCreateWebUIToken returns the token stored at path, creating a new
+// random one if the file is missing or invalid. service.sh deletes the file
+// at boot, so the token changes every boot but survives watchdog restarts
+// (an open companion app keeps working). action.sh hands it to the
+// companion app and the browser fallback.
+func loadOrCreateWebUIToken(path string) (string, error) {
+	if data, err := os.ReadFile(path); err == nil {
+		token := strings.TrimSpace(string(data))
+		if decoded, err := hex.DecodeString(token); err == nil && len(decoded) == webUITokenBytes {
+			return token, nil
+		}
+	}
+	buf := make([]byte, webUITokenBytes)
 	if _, err := rand.Read(buf); err != nil {
 		return "", fmt.Errorf("generate web UI token: %w", err)
 	}
 	token := hex.EncodeToString(buf)
-	if err := writeFileAtomic(filepath.Join(moduleDir(), webUITokenFile), []byte(token), 0o600); err != nil {
+	if err := writeFileAtomic(path, []byte(token), 0o600); err != nil {
 		return "", err
 	}
 	return token, nil
+}
+
+func createWebUIToken() (string, error) {
+	return loadOrCreateWebUIToken(filepath.Join(moduleDir(), webUITokenFile))
+}
+
+const (
+	pageNonceHeader = "X-Shield-Nonce"
+	pageMACHeader   = "X-Shield-Page-MAC"
+)
+
+// pageMAC authenticates the dashboard page for the companion app:
+// HMAC-SHA256(token, "tshield-page:" + nonce + ":" + page). Only the daemon
+// knows the per-boot token, so the app can tell the real page from one
+// served by another app that grabbed 127.0.0.1:64640, and the client's fresh
+// nonce prevents replaying an old response.
+func pageMAC(token, nonce string, page []byte) string {
+	mac := hmac.New(sha256.New, []byte(token))
+	mac.Write([]byte("tshield-page:" + nonce + ":"))
+	mac.Write(page)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// validNonce accepts 16-64 random bytes, hex encoded.
+func validNonce(nonce string) bool {
+	decoded, err := hex.DecodeString(nonce)
+	return err == nil && len(decoded) >= 16 && len(decoded) <= 64
 }

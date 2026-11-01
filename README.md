@@ -75,7 +75,8 @@ Lastly, legacy userspace daemons ran a single-threaded queue and modified payloa
 
 ### 2. 🛡️ GoodbyeDPI / Zapret TLS ClientHello TCP Segmentation
 - Inspects initial HTTPS TLS ClientHello (SNI) and HTTP cleartext requests.
-- Splits TCP payloads into segments at byte-level using raw socket injection.
+- Splits the first data segment **inside the server name** (TLS SNI / HTTP Host) using raw socket injection, so no single packet carries the full name; falls back to a fixed byte position (`SPLIT_MODE=fixed`). Works over IPv4 and IPv6.
+- Optionally rejects HTTP/3 (QUIC, UDP 443) so browsers fall back to TCP, where splitting applies (`BLOCK_QUIC`, off by default).
 - Evades SNI-based DPI middleboxes and domain filtering for all tethered clients (Windows, macOS, iOS, Android, Linux, consoles).
 - **Isolated to Web Ports (80, 443, 8080, 8443):** non-web protocols (BitTorrent, gaming UDP, custom ports) are never split, preventing protocol corruption.
 - Only the first 6 packets of each web connection are inspected (`connbytes`), so streaming and downloads skip DPI processing.
@@ -90,7 +91,8 @@ Lastly, legacy userspace daemons ran a single-threaded queue and modified payloa
   - **Google DNS** (`8.8.8.8`)
   - **AdGuard DNS** (`94.140.14.14` - network-wide ad & tracker blocking)
 - **In-Memory Cache:** honors record TTLs (5 s – 5 min), never caches failures, and merges identical concurrent lookups.
-- **Automatic Fallback:** if DoH fails (or DoH is switched off), queries fall back to plain UDP `1.1.1.1:53` so name resolution keeps working. Fallback queries are **not encrypted**.
+- **Automatic Fallback:** if DoH fails (or DoH is switched off), queries fall back to plain UDP `1.1.1.1:53` so name resolution keeps working. Fallback queries are **not encrypted**; the dashboard counts them and warns while DoH is failing.
+- Cached answers report their remaining TTL, so clients never cache longer than the record allows.
 - **Zero Configuration:** Tethered devices require no manual DNS setup.
 
 ### 4. 🎮 Anti-Bufferbloat Fair Queueing (`fq_codel` QoS)
@@ -125,6 +127,7 @@ GKI-Tether-Shield includes a modern configuration interface designed to never cl
 
 ### 1. Magisk Action Button
 - Tapping the **Action** button on the module card inside the Magisk app immediately launches the native Android configuration dashboard.
+- The app only shows the dashboard after the daemon proves its identity with a per-boot secret, so it must be opened from the Action button.
 - Includes automated HyperOS / MIUI background pop-up permission grants (`cmd appops set com.alperozd.hotspotshield 10021 allow`, etc.) to prevent vendor OS launch blocking.
 
 ### 2. Zero App Drawer Clutter
@@ -132,7 +135,7 @@ GKI-Tether-Shield includes a modern configuration interface designed to never cl
 
 ### 3. Embedded WebUI (KernelSU / APatch / Browser)
 - Embedded HTTP web server running on port `64640`.
-- Supported directly via KernelSU / APatch / MMRL WebUI button, or by navigating to `http://127.0.0.1:64640` in your phone browser.
+- Supported directly via the KernelSU / APatch / MMRL WebUI button (the page talks to the daemon through the manager's root bridge), or by navigating to `http://127.0.0.1:64640` in your phone browser (read-only unless opened from the Action button).
 
 ### 4. Command-Line Interface (`ttlshield`)
 - Run commands directly as root in Termux or an ADB shell:
@@ -140,6 +143,8 @@ GKI-Tether-Shield includes a modern configuration interface designed to never cl
   su -c ttlshield status     # Live packet counters, settings and version
   su -c ttlshield log        # Last daemon log lines (and crash output, if any)
   su -c ttlshield restart    # Restart the background daemon
+  su -c "ttlshield config get"                       # Current settings as JSON
+  su -c "ttlshield config set '{\"DOH_PROVIDER\":\"quad9\"}'"  # Change settings (same as the WebUI)
   ```
 
 ---
@@ -159,6 +164,10 @@ TARGET_TTL=64
 # DPI Evasion / TCP Segmentation (Zapret / GoodbyeDPI mode)
 TCP_SPLIT=1
 SPLIT_POS=2
+# Split inside the TLS SNI / HTTP Host name (auto) or always at SPLIT_POS (fixed)
+SPLIT_MODE=auto
+# Reject HTTP/3 (QUIC, UDP 443) so browsers fall back to TCP, where splitting applies
+BLOCK_QUIC=0
 # First of 4 consecutive NFQUEUE numbers (6464-6467); change only on conflicts
 QUEUE_NUM=6464
 
@@ -293,11 +302,12 @@ All Generic Kernel Image (GKI) kernels (5.4, 5.10, 5.15, 6.1, 6.6, 6.12+) runnin
 ### Requirements
 - Go 1.26+ (`go.mod` pins the toolchain; `GOTOOLCHAIN=auto` fetches it)
 - `zip` and a POSIX shell (Linux / macOS / WSL / Git Bash)
-- Android SDK (build-tools 34+) for companion APK compilation (optional)
+- For the companion app: JDK 17 and the Android SDK (`ANDROID_HOME`) with `platforms;android-35` and `build-tools;35.0.0`
 
 ### Compiling Daemon
 ```bash
-sh scripts/build.sh   # arm64 binary ./tether_shield, version taken from module.prop
+sh scripts/build.sh       # arm64 binary ./tether_shield, version taken from module.prop
+sh scripts/build-apk.sh   # ./HotspotShieldManager.apk from app/ (throwaway key unless APK_KEYSTORE_* are set)
 ```
 
 ### Testing
@@ -319,6 +329,11 @@ when `module.prop` carries a version that has no release yet:
    a `changelog.md` entry. `sh scripts/check-version.sh` verifies they agree;
    the daemon, WebUI and installer read the version from `module.prop`.
 2. Merge to `main`. The workflow tags that commit and publishes the release.
+
+The companion APK is built in CI from `app/`. To sign releases with a stable
+key, add the repository secrets `APK_KEYSTORE_B64` (base64 of a keystore),
+`APK_KEYSTORE_PASSWORD` and `APK_KEY_ALIAS`; without them each build uses a
+throwaway key and the installer reinstalls the app on signature changes.
 
 Pushes that don't change the version build and test only; an existing
 release is never modified.

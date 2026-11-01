@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"mime"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -61,8 +62,17 @@ func applyConfigUpdate(base Config, update map[string]any) (Config, error) {
 	if f, ok := update["SPLIT_POS"].(float64); ok && f > 0 && f < 100 {
 		next.SplitPos = int(f)
 	}
+	if v, ok := update["SPLIT_MODE"]; ok {
+		s, _ := v.(string)
+		mode, valid := parseSplitMode(s)
+		if !valid {
+			return base, fmt.Errorf("SPLIT_MODE must be %q or %q", splitModeAuto, splitModeFixed)
+		}
+		next.SplitMode = mode
+	}
 	boolFields := map[string]*bool{
 		"TCP_SPLIT":            &next.TcpSplit,
+		"BLOCK_QUIC":           &next.BlockQUIC,
 		"BUFFERBLOAT_QOS":      &next.BufferbloatQoS,
 		"WIFI_POWER_SAVE_LOCK": &next.WifiPowerSaveLock,
 		"TCP_LOW_LATENCY":      &next.TcpLowLatency,
@@ -151,31 +161,49 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	c := cfgSnapshot()
 	stats := map[string]any{
-		"total_packets":     atomic.LoadUint64(&totalPackets),
-		"ipv4_packets":      atomic.LoadUint64(&ipv4Packets),
-		"ipv6_packets":      atomic.LoadUint64(&ipv6Packets),
-		"ttl_modified":      atomic.LoadUint64(&ttlModified),
-		"tcp_split_packets": atomic.LoadUint64(&tcpSplitPkts),
-		"doh_queries":       atomic.LoadUint64(&dohQueries),
-		"dns_cache_hits":    atomic.LoadUint64(&dnsCacheHits),
-		"target_ttl":        c.TargetTTL,
-		"tcp_split_enabled": c.TcpSplit,
-		"doh_enabled":       c.DohEnabled,
-		"doh_provider":      c.DohProvider,
-		"version":           moduleVersion,
-		"version_code":      versionCode(),
-		"updated_at":        time.Now().Format(time.RFC3339),
+		"total_packets":        atomic.LoadUint64(&totalPackets),
+		"ipv4_packets":         atomic.LoadUint64(&ipv4Packets),
+		"ipv6_packets":         atomic.LoadUint64(&ipv6Packets),
+		"ttl_modified":         atomic.LoadUint64(&ttlModified),
+		"tcp_split_packets":    atomic.LoadUint64(&tcpSplitPkts),
+		"doh_queries":          atomic.LoadUint64(&dohQueries),
+		"dns_cache_hits":       atomic.LoadUint64(&dnsCacheHits),
+		"dns_fallback_queries": atomic.LoadUint64(&dnsFallbackQueries),
+		"dns_plain_queries":    atomic.LoadUint64(&dnsPlainQueries),
+		"dns_last_fallback":    lastDNSFallback.Load(),
+		"target_ttl":           c.TargetTTL,
+		"tcp_split_enabled":    c.TcpSplit,
+		"block_quic":           c.BlockQUIC,
+		"bufferbloat_qos":      c.BufferbloatQoS,
+		"doh_enabled":          c.DohEnabled,
+		"doh_provider":         c.DohProvider,
+		"version":              moduleVersion,
+		"version_code":         versionCode(),
+		"updated_at":           time.Now().Format(time.RFC3339),
 	}
 	_ = json.NewEncoder(w).Encode(stats)
 }
 
-func indexHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if len(webUIHTML) > 0 {
-		_, _ = w.Write(webUIHTML)
-		return
+// indexHandler serves the dashboard. When the companion app sends a nonce,
+// the response carries a MAC over the exact page bytes (see pageMAC).
+func indexHandler(token string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		page := webUIHTML
+		if len(page) == 0 {
+			data, err := os.ReadFile(getWebrootFile())
+			if err != nil {
+				http.Error(w, "dashboard not found", http.StatusNotFound)
+				return
+			}
+			page = data
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		if nonce := r.Header.Get(pageNonceHeader); token != "" && validNonce(nonce) {
+			w.Header().Set(pageMACHeader, pageMAC(token, nonce, page))
+		}
+		_, _ = w.Write(page)
 	}
-	http.ServeFile(w, r, getWebrootFile())
 }
 
 func startHTTPServer() {
@@ -187,7 +215,7 @@ func startHTTPServer() {
 	auth := newWriteAuthorizer(token)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", requireTrustedLocal(indexHandler))
+	mux.HandleFunc("/", requireTrustedLocal(indexHandler(token)))
 	mux.HandleFunc("/api/stats", requireTrustedLocal(statsHandler))
 	mux.HandleFunc("/api/config", configHandler(getConfigPath, auth.allowed))
 

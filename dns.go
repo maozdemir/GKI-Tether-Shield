@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -166,6 +167,24 @@ func resolvePlainUDP(query []byte) ([]byte, error) {
 func resolveDNS(query []byte) ([]byte, error) {
 	if cfgSnapshot().DohEnabled {
 		return resolveDoH(query)
+	}
+	atomic.AddUint64(&dnsPlainQueries, 1)
+	return resolvePlainUDP(query)
+}
+
+// lastDNSFallback is the Unix time of the last unencrypted fallback query,
+// so the dashboard can warn while DoH is failing.
+var lastDNSFallback atomic.Int64
+
+var dnsLogLimiter = &logLimiter{max: 3, window: time.Minute}
+
+// resolveFallback answers in plain DNS after DoH failed, and records it:
+// the user chose encrypted DNS, so silently downgrading is not acceptable.
+func resolveFallback(query []byte, dohErr error) ([]byte, error) {
+	atomic.AddUint64(&dnsFallbackQueries, 1)
+	lastDNSFallback.Store(dnsNow().Unix())
+	if ok, suppressed := dnsLogLimiter.allow(time.Now()); ok {
+		logf("DoH failed, answering in plain DNS (%d similar suppressed): %v", suppressed, dohErr)
 	}
 	return resolvePlainUDP(query)
 }

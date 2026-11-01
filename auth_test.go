@@ -3,11 +3,15 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -132,5 +136,67 @@ func TestRequestUIDRealSocket(t *testing.T) {
 
 	if uid := <-got; uid != uint32(os.Getuid()) {
 		t.Fatalf("requestUID = %d, want %d", uid, os.Getuid())
+	}
+}
+
+func TestIndexHandlerAuthenticatesPage(t *testing.T) {
+	const token = "0123456789abcdef"
+	h := indexHandler(token)
+	nonce := "00112233445566778899aabbccddeeff"
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set(pageNonceHeader, nonce)
+	w := httptest.NewRecorder()
+	h(w, r)
+	page := w.Body.Bytes()
+	if w.Code != http.StatusOK || len(page) == 0 {
+		t.Fatalf("status %d, %d bytes", w.Code, len(page))
+	}
+	mac := hmac.New(sha256.New, []byte(token))
+	mac.Write([]byte("tshield-page:" + nonce + ":"))
+	mac.Write(page)
+	if got, want := w.Header().Get(pageMACHeader), hex.EncodeToString(mac.Sum(nil)); got != want {
+		t.Fatalf("page MAC = %q, want %q", got, want)
+	}
+
+	// Browsers send no nonce and get no MAC; invalid nonces get none either.
+	for _, nonce := range []string{"", "xyz", "00", strings.Repeat("a", 200)} {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		if nonce != "" {
+			r.Header.Set(pageNonceHeader, nonce)
+		}
+		w := httptest.NewRecorder()
+		h(w, r)
+		if w.Code != http.StatusOK || w.Header().Get(pageMACHeader) != "" {
+			t.Fatalf("nonce %q: status %d, MAC %q", nonce, w.Code, w.Header().Get(pageMACHeader))
+		}
+	}
+
+	// Without a token there is nothing to authenticate with.
+	r = httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set(pageNonceHeader, nonce)
+	w = httptest.NewRecorder()
+	indexHandler("")(w, r)
+	if w.Header().Get(pageMACHeader) != "" {
+		t.Fatal("no MAC must be produced without a token")
+	}
+}
+
+func TestLoadOrCreateWebUITokenReusesExisting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".webui_token")
+	first, err := loadOrCreateWebUIToken(path)
+	if err != nil || len(first) != 48 {
+		t.Fatalf("create: %q, %v", first, err)
+	}
+	second, err := loadOrCreateWebUIToken(path)
+	if err != nil || second != first {
+		t.Fatalf("restart must reuse the boot's token: %q vs %q (%v)", second, first, err)
+	}
+	if err := os.WriteFile(path, []byte("not-a-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	third, err := loadOrCreateWebUIToken(path)
+	if err != nil || third == "not-a-token" || len(third) != 48 {
+		t.Fatalf("invalid token file must be replaced: %q, %v", third, err)
 	}
 }

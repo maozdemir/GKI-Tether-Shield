@@ -24,7 +24,15 @@ fi
 
 ui_print "- Installing mini config companion app (zero drawer icon)..."
 if [ -f "$MODPATH/HotspotShieldManager.apk" ]; then
-    pm install -r "$MODPATH/HotspotShieldManager.apk" >/dev/null 2>&1
+    APK="$MODPATH/HotspotShieldManager.apk"
+    if ! pm install -r "$APK" >/dev/null 2>&1; then
+        # Usually a signing-key change (builds without the release key are
+        # signed with a fresh key): Android refuses the update, so reinstall.
+        # The app keeps no data; the daemon re-reads its new UID on its own.
+        pm uninstall com.alperozd.hotspotshield >/dev/null 2>&1
+        pm install "$APK" >/dev/null 2>&1 ||
+            ui_print "! Companion app install failed; use the browser dashboard instead"
+    fi
     cmd appops set com.alperozd.hotspotshield 10021 allow 2>/dev/null
     cmd appops set com.alperozd.hotspotshield 10022 allow 2>/dev/null
     cmd appops set com.alperozd.hotspotshield 10008 allow 2>/dev/null

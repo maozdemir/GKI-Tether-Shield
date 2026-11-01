@@ -157,6 +157,8 @@ start_daemon() {
 }
 
 killall -9 tether_shield 2>/dev/null
+# New web UI token every boot (the daemon reuses it across watchdog restarts).
+rm -f "$MODDIR/.webui_token"
 setup_dns_rules
 start_daemon
 
@@ -200,6 +202,11 @@ setup_queue_rules() {
     ip6tables -t mangle -F $CHAIN
     ip6tables -t mangle -A $CHAIN -m hl ! --hl-eq "$TTL" -j NFQUEUE $QUEUE_TARGET 2>/dev/null ||
         ip6tables -t mangle -A $CHAIN -j NFQUEUE $QUEUE_TARGET
+    # IPv6 web handshakes for DPI splitting, as for IPv4 above.
+    ip6tables -t mangle -I $CHAIN 1 -p tcp -m multiport --dports 80,443 \
+        -m connbytes --connbytes-dir original --connbytes-mode packets --connbytes 1:6 \
+        -j NFQUEUE $QUEUE_TARGET 2>/dev/null ||
+        ip6tables -t mangle -I $CHAIN 1 -p tcp -m multiport --dports 80,443 -j NFQUEUE $QUEUE_TARGET
 
     for ipt in iptables ip6tables; do
         $ipt -t mangle -N $WAN_CHAIN 2>/dev/null
@@ -219,6 +226,33 @@ for ipt in iptables ip6tables; do
     $ipt -t mangle -D POSTROUTING -o rmnet+ -j $CHAIN 2>/dev/null
 done
 setup_queue_rules
+
+# HTTP/3 (QUIC over UDP 443) can't be TCP-split, so DPI sees its SNI.
+# With BLOCK_QUIC (and TCP_SPLIT) on, outgoing UDP 443 is rejected with an
+# ICMP error so browsers fall back to TCP immediately (DROP only if REJECT
+# is unavailable, which makes them wait for a timeout instead).
+QUIC_CHAIN=tshield_quic
+want_quic_block() {
+    conf_enabled BLOCK_QUIC 0 && conf_enabled TCP_SPLIT 1
+}
+set_quic_block() {
+    for ipt in iptables ip6tables; do
+        for hook in FORWARD OUTPUT; do
+            $ipt -D $hook -j $QUIC_CHAIN 2>/dev/null
+        done
+        $ipt -F $QUIC_CHAIN 2>/dev/null
+        $ipt -X $QUIC_CHAIN 2>/dev/null
+        [ "$1" = 1 ] || continue
+        $ipt -N $QUIC_CHAIN
+        $ipt -A $QUIC_CHAIN -p udp --dport 443 -j REJECT 2>/dev/null ||
+            $ipt -A $QUIC_CHAIN -p udp --dport 443 -j DROP
+        for hook in FORWARD OUTPUT; do
+            $ipt -I $hook -j $QUIC_CHAIN
+        done
+    done
+}
+if want_quic_block; then QUIC_BLOCKED=1; else QUIC_BLOCKED=0; fi
+set_quic_block "$QUIC_BLOCKED"
 
 # 6. TCP MSS Clamping to PMTU
 iptables -t mangle -C FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
@@ -296,6 +330,11 @@ CONF_STAMP="$MODDIR/.config_applied"
             if [ "$TTL" != "$old_ttl" ] || [ "$QUEUE" != "$old_queue" ]; then
                 apply_default_ttl
                 setup_queue_rules
+            fi
+            if want_quic_block; then want_quic=1; else want_quic=0; fi
+            if [ "$want_quic" != "$QUIC_BLOCKED" ]; then
+                set_quic_block "$want_quic"
+                QUIC_BLOCKED="$want_quic"
             fi
             if [ "$QUEUE" != "$old_queue" ]; then
                 # Bound queues can't change live; restart onto the new range.

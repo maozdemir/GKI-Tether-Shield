@@ -3,17 +3,11 @@
 package main
 
 import (
-	"bytes"
 	_ "embed"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
-	"time"
 )
 
 //go:embed index.html
@@ -72,44 +66,14 @@ var (
 	ipv6Packets  uint64
 	dohQueries   uint64
 	dnsCacheHits uint64
+	// Unencrypted DNS: DoH was enabled but failed (fallback) / DoH is off.
+	dnsFallbackQueries uint64
+	dnsPlainQueries    uint64
 )
 
-// fetchStatus queries the running daemon's stats API and returns them
-// pretty-printed. The CLI runs as root, which the API trusts.
-func fetchStatus(url string) (string, error) {
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return "", fmt.Errorf("daemon not reachable: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("daemon returned HTTP %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if err != nil {
-		return "", fmt.Errorf("read status: %w", err)
-	}
-	var pretty bytes.Buffer
-	if err := json.Indent(&pretty, body, "", "  "); err != nil {
-		return "", fmt.Errorf("decode status: %w", err)
-	}
-	return pretty.String(), nil
-}
-
-func runStatusCommand() {
-	out, err := fetchStatus(fmt.Sprintf("http://127.0.0.1:%d/api/stats", WEB_PORT))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v (is the daemon running?)\n", err)
-		os.Exit(1)
-	}
-	fmt.Println(out)
-}
-
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "status" || os.Args[1] == "-status" || os.Args[1] == "--status") {
-		runStatusCommand()
-		return
+	if code, handled := runCLI(os.Args[1:], localAPIBase(), os.Stdout, os.Stderr); handled {
+		os.Exit(code)
 	}
 
 	_ = syscall.Setpriority(syscall.PRIO_PROCESS, 0, -20)
@@ -128,11 +92,8 @@ func main() {
 	logf("Starting %s (WebUI: %d, DoH DNS: %d, Target TTL: %d, TCP Split: %v)",
 		moduleVersion, WEB_PORT, DNS_PORT, startCfg.TargetTTL, startCfg.TcpSplit)
 
-	rawFd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
-	if err == nil {
-		_ = syscall.SetsockoptInt(rawFd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1)
-		defer syscall.Close(rawFd)
-	}
+	raw := openRawSockets()
+	defer raw.close()
 
 	queues, err := openQueues(startCfg.QueueNum, NUM_QUEUES)
 	if err != nil {
@@ -157,7 +118,7 @@ func main() {
 
 	errs := make(chan error, len(queues))
 	for _, q := range queues {
-		go func(q *queueWorker) { errs <- q.run(rawFd) }(q)
+		go func(q *queueWorker) { errs <- q.run(raw) }(q)
 	}
 	// Any queue dying means its share of traffic bypasses TTL fixing, so exit
 	// and let the service.sh watchdog restart the daemon with all queues bound.

@@ -38,6 +38,8 @@ type Config struct {
 	TargetTTL         uint8  `json:"TARGET_TTL"`
 	TcpSplit          bool   `json:"TCP_SPLIT"`
 	SplitPos          int    `json:"SPLIT_POS"`
+	SplitMode         string `json:"SPLIT_MODE"`
+	BlockQUIC         bool   `json:"BLOCK_QUIC"`
 	BufferbloatQoS    bool   `json:"BUFFERBLOAT_QOS"`
 	WifiPowerSaveLock bool   `json:"WIFI_POWER_SAVE_LOCK"`
 	TcpLowLatency     bool   `json:"TCP_LOW_LATENCY"`
@@ -50,6 +52,8 @@ var defaultConfig = Config{
 	TargetTTL:         64,
 	TcpSplit:          true,
 	SplitPos:          2,
+	SplitMode:         splitModeAuto,
+	BlockQUIC:         false,
 	BufferbloatQoS:    true,
 	WifiPowerSaveLock: true,
 	TcpLowLatency:     true,
@@ -109,6 +113,12 @@ func applyConfigValue(c *Config, k, v string) {
 		}
 	case "TCP_SPLIT":
 		c.TcpSplit = parseBool(v)
+	case "BLOCK_QUIC":
+		c.BlockQUIC = parseBool(v)
+	case "SPLIT_MODE":
+		if mode, ok := parseSplitMode(v); ok {
+			c.SplitMode = mode
+		}
 	case "SPLIT_POS":
 		if val, err := strconv.Atoi(v); err == nil && val > 0 && val < 100 {
 			c.SplitPos = val
@@ -130,6 +140,15 @@ func applyConfigValue(c *Config, k, v string) {
 			c.QueueNum = uint16(val)
 		}
 	}
+}
+
+// parseSplitMode accepts "auto" or "fixed" (case-insensitive).
+func parseSplitMode(v string) (string, bool) {
+	switch mode := strings.ToLower(strings.TrimSpace(v)); mode {
+	case splitModeAuto, splitModeFixed:
+		return mode, true
+	}
+	return "", false
 }
 
 // loadConfigFile returns base overlaid with the file's settings; a missing
@@ -164,13 +183,15 @@ func saveConfigToFile(path string, c Config) error {
 TARGET_TTL=%d
 TCP_SPLIT=%t
 SPLIT_POS=%d
+SPLIT_MODE=%s
+BLOCK_QUIC=%t
 BUFFERBLOAT_QOS=%t
 WIFI_POWER_SAVE_LOCK=%t
 TCP_LOW_LATENCY=%t
 DOH_ENABLED=%t
 DOH_PROVIDER=%s
 QUEUE_NUM=%d
-`, c.TargetTTL, c.TcpSplit, c.SplitPos, c.BufferbloatQoS, c.WifiPowerSaveLock, c.TcpLowLatency, c.DohEnabled, c.DohProvider, c.QueueNum)
+`, c.TargetTTL, c.TcpSplit, c.SplitPos, c.SplitMode, c.BlockQUIC, c.BufferbloatQoS, c.WifiPowerSaveLock, c.TcpLowLatency, c.DohEnabled, c.DohProvider, c.QueueNum)
 
 	return writeFileAtomic(path, []byte(content), 0o644)
 }

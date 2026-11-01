@@ -1,7 +1,7 @@
 #!/bin/sh
 # Package the Magisk/KernelSU/APatch module ZIP.
 # Usage: scripts/package.sh <version-tag> [output-dir]
-# Expects the arm64 daemon binary ./tether_shield to be built already.
+# Expects ./tether_shield (scripts/build.sh) and the APK (scripts/build-apk.sh).
 set -eu
 
 TAG="${1:?usage: scripts/package.sh <version-tag> [output-dir]}"
@@ -10,7 +10,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
-[ -f "$ROOT/tether_shield" ] || { echo "error: $ROOT/tether_shield not found; build it first" >&2; exit 1; }
+[ -f "$ROOT/tether_shield" ] || { echo "error: $ROOT/tether_shield not found; run scripts/build.sh first" >&2; exit 1; }
+[ -f "$ROOT/HotspotShieldManager.apk" ] || { echo "error: $ROOT/HotspotShieldManager.apk not found; run scripts/build-apk.sh first" >&2; exit 1; }
 
 for f in module.prop config.conf service.sh customize.sh action.sh uninstall.sh \
          HotspotShieldManager.apk tether_shield update.json changelog.md; do

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
@@ -20,9 +21,14 @@ const (
 )
 
 type dnsCacheEntry struct {
-	response  []byte
-	expiresAt time.Time
+	response   []byte
+	storedAt   time.Time
+	expiresAt  time.Time
+	ttlOffsets []int // byte offsets of the records' TTL fields (OPT excluded)
 }
+
+// dnsNow is the cache clock (a var for tests).
+var dnsNow = time.Now
 
 var (
 	dnsCache   = make(map[string]dnsCacheEntry)
@@ -70,6 +76,64 @@ func cacheTTLFor(resp []byte) time.Duration {
 	return min(max(ttl, dnsCacheMinTTL), dnsCacheMaxTTL)
 }
 
+const dnsTypeOPT = 41
+
+// rrTTLOffsets walks a DNS message and returns the byte offsets of the TTL
+// field of every resource record (answers, authorities, additionals) except
+// EDNS OPT pseudo-records, whose "TTL" holds flags. ok is false for any
+// malformed or truncated message.
+func rrTTLOffsets(msg []byte) (offsets []int, ok bool) {
+	if len(msg) < 12 {
+		return nil, false
+	}
+	count := func(i int) int { return int(binary.BigEndian.Uint16(msg[i : i+2])) }
+	off := 12
+	for range count(4) { // questions: name, type, class
+		if off, ok = skipDNSName(msg, off); !ok || off+4 > len(msg) {
+			return nil, false
+		}
+		off += 4
+	}
+	records := count(6) + count(8) + count(10)
+	for range records {
+		if off, ok = skipDNSName(msg, off); !ok || off+10 > len(msg) {
+			return nil, false
+		}
+		rrType := binary.BigEndian.Uint16(msg[off : off+2])
+		rdLen := int(binary.BigEndian.Uint16(msg[off+8 : off+10]))
+		if rrType != dnsTypeOPT {
+			offsets = append(offsets, off+4)
+		}
+		off += 10 + rdLen
+		if off > len(msg) {
+			return nil, false
+		}
+	}
+	return offsets, true
+}
+
+// skipDNSName returns the offset just past the (possibly compressed) name
+// starting at off. A compression pointer ends the name, so loops can't occur.
+func skipDNSName(msg []byte, off int) (int, bool) {
+	for off < len(msg) {
+		l := int(msg[off])
+		switch {
+		case l == 0:
+			return off + 1, true
+		case l&0xC0 == 0xC0:
+			if off+2 > len(msg) {
+				return 0, false
+			}
+			return off + 2, true
+		case l&0xC0 != 0:
+			return 0, false // reserved label types
+		default:
+			off += 1 + l
+		}
+	}
+	return 0, false
+}
+
 // withQueryID returns a copy of resp carrying the caller's transaction ID.
 func withQueryID(resp, query []byte) []byte {
 	out := append([]byte(nil), resp...)
@@ -81,14 +145,32 @@ func lookupDNSCache(queryKey string, query []byte) ([]byte, bool) {
 	dnsCacheMu.RLock()
 	entry, ok := dnsCache[queryKey]
 	dnsCacheMu.RUnlock()
-	if !ok || !time.Now().Before(entry.expiresAt) {
+	now := dnsNow()
+	if !ok || !now.Before(entry.expiresAt) {
 		return nil, false
 	}
-	return withQueryID(entry.response, query), true
+	resp := withQueryID(entry.response, query)
+	// Report the remaining lifetime, not the original TTL, so clients don't
+	// cache an answer for longer than the authoritative TTL allows.
+	elapsed := uint32(now.Sub(entry.storedAt) / time.Second)
+	for _, off := range entry.ttlOffsets {
+		ttl := binary.BigEndian.Uint32(resp[off : off+4])
+		if ttl > elapsed {
+			ttl -= elapsed
+		} else {
+			ttl = 0
+		}
+		binary.BigEndian.PutUint32(resp[off:off+4], ttl)
+	}
+	return resp, true
 }
 
 func storeDNSCache(queryKey string, resp []byte, ttl time.Duration) {
-	now := time.Now()
+	offsets, ok := rrTTLOffsets(resp)
+	if !ok {
+		return // never serve a cached answer whose TTLs can't be adjusted
+	}
+	now := dnsNow()
 	dnsCacheMu.Lock()
 	defer dnsCacheMu.Unlock()
 	if len(dnsCache) >= dnsCacheMaxEntries {
@@ -101,7 +183,7 @@ func storeDNSCache(queryKey string, resp []byte, ttl time.Duration) {
 			dnsCache = make(map[string]dnsCacheEntry)
 		}
 	}
-	dnsCache[queryKey] = dnsCacheEntry{response: resp, expiresAt: now.Add(ttl)}
+	dnsCache[queryKey] = dnsCacheEntry{response: resp, storedAt: now, expiresAt: now.Add(ttl), ttlOffsets: offsets}
 }
 
 func resolveDoH(query []byte) ([]byte, error) {
@@ -128,8 +210,7 @@ func resolveDoH(query []byte) ([]byte, error) {
 		return resp, nil
 	})
 	if err != nil {
-		// Fallback to plain DNS if DoH failed
-		return resolvePlainUDP(query)
+		return resolveFallback(query, err)
 	}
 	return withQueryID(v.([]byte), query), nil
 }

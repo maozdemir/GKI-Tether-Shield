@@ -37,30 +37,39 @@ settings put global tether_dun_required 0 2>/dev/null
 settings put global tether_entitlement_check_state 0 2>/dev/null
 
 # 4. Start Go TTL, DPI & DoH Daemon
-killall -9 nfqttl ttlfixer 2>/dev/null
-nohup $MODDIR/nfqttl </dev/null >/dev/null 2>&1 &
+# Upgrade cleanup: v3.5 and earlier ran the daemon as "nfqttl" with chains
+# nfqttli/nfqttlo. Only needed when updating without a reboot; safe to
+# remove once nobody upgrades from <= v3.5 in place.
+killall -9 nfqttl 2>/dev/null
+for hook in PREROUTING OUTPUT; do
+    iptables -t mangle -D $hook -j nfqttli 2>/dev/null
+    iptables -t mangle -D $hook -j nfqttlo 2>/dev/null
+done
+for wan in rmnet+ rmnet_data+; do
+    iptables -t mangle -D POSTROUTING -o $wan -j nfqttlo 2>/dev/null
+done
+for chain in nfqttli nfqttlo; do
+    iptables -t mangle -F $chain 2>/dev/null
+    iptables -t mangle -X $chain 2>/dev/null
+done
 
-# 5. High-Efficiency NFQUEUE Mangle Rules
-# Clean old chains and rules to prevent duplicate queuing
-iptables -t mangle -D PREROUTING -j nfqttli 2>/dev/null
-iptables -t mangle -D OUTPUT -j nfqttlo 2>/dev/null
-iptables -t mangle -D POSTROUTING -j nfqttlo 2>/dev/null
-iptables -t mangle -F nfqttli 2>/dev/null
-iptables -t mangle -X nfqttli 2>/dev/null
+killall -9 tether_shield 2>/dev/null
+nohup "$MODDIR/tether_shield" </dev/null >/dev/null 2>&1 &
 
-# Create dedicated chain:
+# 5. High-Efficiency NFQUEUE Mangle Rules (chain tshield_out)
 # 1) Intercept ports 80, 443 for GoodbyeDPI / TLS SNI splitting
 # 2) Intercept non-64 TTL packets for real-time TTL normalization
 # 3) Completely bypass BitTorrent, gaming UDP, and bulk file downloads
 # Packets are spread over 4 queues (6464-6467, one daemon worker per queue,
 # NUM_QUEUES in nfqueue.go) by flow hash, so per-flow ordering is preserved.
 # Falls back to a single queue if --queue-balance is unsupported.
+CHAIN=tshield_out
 QUEUE_TARGET="--queue-balance 6464:6467 --queue-bypass"
-iptables -t mangle -N nfqttlo 2>/dev/null
-iptables -t mangle -F nfqttlo
-if ! iptables -t mangle -A nfqttlo -m ttl ! --ttl-eq 64 -j NFQUEUE $QUEUE_TARGET 2>/dev/null; then
+iptables -t mangle -N $CHAIN 2>/dev/null
+iptables -t mangle -F $CHAIN
+if ! iptables -t mangle -A $CHAIN -m ttl ! --ttl-eq 64 -j NFQUEUE $QUEUE_TARGET 2>/dev/null; then
     QUEUE_TARGET="--queue-num 6464 --queue-bypass"
-    iptables -t mangle -A nfqttlo -m ttl ! --ttl-eq 64 -j NFQUEUE $QUEUE_TARGET
+    iptables -t mangle -A $CHAIN -m ttl ! --ttl-eq 64 -j NFQUEUE $QUEUE_TARGET
 fi
 # The TLS ClientHello / HTTP request is within the first few packets of a
 # connection, so only those need DPI splitting. Matching just packets 1-6
@@ -68,14 +77,14 @@ fi
 # non-64 TTL are still queued by the rule below for TTL normalization.
 # Falls back to queueing all web packets if xt_connbytes is unavailable.
 sysctl -w net.netfilter.nf_conntrack_acct=1 2>/dev/null
-iptables -t mangle -I nfqttlo 1 -p tcp -m multiport --dports 80,443 \
+iptables -t mangle -I $CHAIN 1 -p tcp -m multiport --dports 80,443 \
     -m connbytes --connbytes-dir original --connbytes-mode packets --connbytes 1:6 \
     -j NFQUEUE $QUEUE_TARGET 2>/dev/null ||
-    iptables -t mangle -I nfqttlo 1 -p tcp -m multiport --dports 80,443 -j NFQUEUE $QUEUE_TARGET
+    iptables -t mangle -I $CHAIN 1 -p tcp -m multiport --dports 80,443 -j NFQUEUE $QUEUE_TARGET
 
-# Apply in POSTROUTING on outgoing WAN (cellular) interfaces
-iptables -t mangle -C POSTROUTING -o rmnet+ -j nfqttlo 2>/dev/null || iptables -t mangle -A POSTROUTING -o rmnet+ -j nfqttlo
-iptables -t mangle -C POSTROUTING -o rmnet_data+ -j nfqttlo 2>/dev/null || iptables -t mangle -A POSTROUTING -o rmnet_data+ -j nfqttlo
+# Apply in POSTROUTING on outgoing WAN (cellular) interfaces.
+# rmnet+ also matches rmnet_data*, so one rule covers both.
+iptables -t mangle -C POSTROUTING -o rmnet+ -j $CHAIN 2>/dev/null || iptables -t mangle -A POSTROUTING -o rmnet+ -j $CHAIN
 
 # 6. TCP MSS Clamping to PMTU
 iptables -t mangle -C FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu

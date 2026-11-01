@@ -287,10 +287,10 @@ All Generic Kernel Image (GKI) kernels (5.4, 5.10, 5.15, 6.1, 6.6, 6.12+) runnin
 ### Compiling Daemon
 ```bash
 # Windows PowerShell
-$env:GOOS="linux"; $env:GOARCH="arm64"; go build -trimpath -ldflags="-s -w" -o nfqttl .
+$env:GOOS="linux"; $env:GOARCH="arm64"; go build -trimpath -ldflags="-s -w" -o tether_shield .
 
 # Linux / macOS
-GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o nfqttl .
+GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o tether_shield .
 ```
 
 ### Testing

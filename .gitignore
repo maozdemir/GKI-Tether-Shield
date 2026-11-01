@@ -1,0 +1,4 @@
+# Build outputs
+/tether_shield
+/dist/
+*.test

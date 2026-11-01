@@ -36,7 +36,7 @@ jobs:
           go test -race .
 
       - name: Build arm64 binary
-        run: GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o nfqttl .
+        run: GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o tether_shield .
 
       - name: Package module ZIP
         run: |
@@ -82,7 +82,7 @@ jobs:
 
       - name: Build and package
         run: |
-          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o nfqttl .
+          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o tether_shield .
           sh scripts/package.sh "$TAG" dist
           (cd dist && sha256sum *.zip > SHA256SUMS)
 

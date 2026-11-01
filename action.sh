@@ -3,8 +3,8 @@ MODDIR="/data/adb/modules/gki_hotspot_shield"
 [ -d "$MODDIR" ] || MODDIR="${0%/*}"
 
 # 1. Ensure daemon is running
-if ! ps -A | grep -q nfqttl; then
-    nohup "$MODDIR/nfqttl" </dev/null >/dev/null 2>&1 &
+if ! pidof tether_shield >/dev/null; then
+    nohup "$MODDIR/tether_shield" </dev/null >/dev/null 2>&1 &
     sleep 1
 fi
 

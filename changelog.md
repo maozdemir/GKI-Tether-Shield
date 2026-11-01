@@ -1,5 +1,10 @@
 # 🛡️ GKI-Tether-Shield Changelog
 
+## Version 3.8
+* **WebUI Button Fixed**: The KernelSU / APatch / MMRL WebUI button now shows live stats and saves settings (it previously could not reach the service).
+* **Companion App Rebuilt**: Built from source; it now verifies it is talking to the real service before showing anything, pauses when in the background, opens links in your browser, and only uses plain HTTP for the local dashboard. Updates reinstall it automatically if needed.
+* **Command Line**: `ttlshield config get` and `ttlshield config set '<json>'` read and change settings from a root shell.
+
 ## Version 3.7
 * **Every Chipset**: TTL fixing no longer depends on Qualcomm `rmnet` interface names; MediaTek, Exynos, Tensor, Unisoc and 464XLAT (CLAT) connections are covered too.
 * **Settings Kept on Update**: Your configuration now survives module updates. (Updating from 3.5 to 3.6 reset it once; please re-apply your settings if needed.)

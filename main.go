@@ -3,17 +3,11 @@
 package main
 
 import (
-	"bytes"
 	_ "embed"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
-	"time"
 )
 
 //go:embed index.html
@@ -74,42 +68,9 @@ var (
 	dnsCacheHits uint64
 )
 
-// fetchStatus queries the running daemon's stats API and returns them
-// pretty-printed. The CLI runs as root, which the API trusts.
-func fetchStatus(url string) (string, error) {
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return "", fmt.Errorf("daemon not reachable: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("daemon returned HTTP %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if err != nil {
-		return "", fmt.Errorf("read status: %w", err)
-	}
-	var pretty bytes.Buffer
-	if err := json.Indent(&pretty, body, "", "  "); err != nil {
-		return "", fmt.Errorf("decode status: %w", err)
-	}
-	return pretty.String(), nil
-}
-
-func runStatusCommand() {
-	out, err := fetchStatus(fmt.Sprintf("http://127.0.0.1:%d/api/stats", WEB_PORT))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v (is the daemon running?)\n", err)
-		os.Exit(1)
-	}
-	fmt.Println(out)
-}
-
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "status" || os.Args[1] == "-status" || os.Args[1] == "--status") {
-		runStatusCommand()
-		return
+	if code, handled := runCLI(os.Args[1:], localAPIBase(), os.Stdout, os.Stderr); handled {
+		os.Exit(code)
 	}
 
 	_ = syscall.Setpriority(syscall.PRIO_PROCESS, 0, -20)

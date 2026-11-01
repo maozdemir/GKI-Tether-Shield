@@ -242,6 +242,70 @@
     })();
 
     // Filled from /api/stats (the daemon reports module.prop's version).
+    // API access. In the browser / companion app the page is served by the
+    // daemon, so plain fetch() works. KernelSU, APatch and MMRL instead load
+    // webroot/index.html from their own https origin, where fetch('/api/...')
+    // never reaches the daemon; there the same calls go through the manager's
+    // root bridge (ksu.exec) to the daemon's CLI, which talks to the API as root.
+    const DAEMON_BIN = '/data/adb/modules/gki_hotspot_shield/tether_shield';
+    const IN_ROOT_MANAGER = location.origin !== 'http://127.0.0.1:64640' &&
+      typeof window.ksu === 'object' && window.ksu !== null && typeof window.ksu.exec === 'function';
+
+    let ksuCallbackSeq = 0;
+    function ksuExec(command) {
+      return new Promise((resolve, reject) => {
+        const name = 'tshield_exec_cb_' + Date.now() + '_' + (ksuCallbackSeq++);
+        window[name] = (errno, stdout, stderr) => {
+          delete window[name];
+          resolve({ errno, stdout, stderr });
+        };
+        try {
+          window.ksu.exec(command, '{}', name);
+        } catch (e) {
+          delete window[name];
+          reject(e);
+        }
+      });
+    }
+
+    // Single-quote for the root shell: the only special character inside
+    // single quotes is the quote itself.
+    function shQuote(value) {
+      return "'" + String(value).replace(/'/g, "'\\''") + "'";
+    }
+
+    async function cliCall(args) {
+      const { errno, stdout, stderr } = await ksuExec(DAEMON_BIN + ' ' + args);
+      if (errno !== 0) {
+        return { ok: false, status: /HTTP 403/.test(stderr || '') ? 403 : 500, data: null };
+      }
+      return { ok: true, status: 200, data: JSON.parse(stdout) };
+    }
+
+    // Returns { ok, status, data }.
+    async function apiGet(path) {
+      if (IN_ROOT_MANAGER) {
+        return cliCall(path === '/api/stats' ? 'status' : 'config get');
+      }
+      const res = await fetch(path);
+      return { ok: res.ok, status: res.status, data: res.ok ? await res.json() : null };
+    }
+
+    async function apiSaveConfig(body) {
+      const json = JSON.stringify(body);
+      if (IN_ROOT_MANAGER) {
+        return cliCall('config set ' + shQuote(json));
+      }
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: SHIELD_TOKEN
+          ? { 'Content-Type': 'application/json', 'X-Shield-Token': SHIELD_TOKEN }
+          : { 'Content-Type': 'application/json' },
+        body: json
+      });
+      return { ok: res.ok, status: res.status, data: null };
+    }
+
     let currentVersionCode = 0;
 
     function showToast(msg) {
@@ -284,9 +348,9 @@
 
     async function fetchStats() {
       try {
-        const res = await fetch('/api/stats');
+        const res = await apiGet('/api/stats');
         if (res.ok) {
-          const data = await res.json();
+          const data = res.data;
           document.getElementById('ttlFixed').innerText = data.ttl_modified.toLocaleString();
           document.getElementById('tcpSplit').innerText = data.tcp_split_packets.toLocaleString();
           document.getElementById('dohQueries').innerText = (data.doh_queries || 0).toLocaleString();
@@ -303,9 +367,9 @@
 
     async function loadConfig() {
       try {
-        const res = await fetch('/api/config');
+        const res = await apiGet('/api/config');
         if (res.ok) {
-          const cfg = await res.json();
+          const cfg = res.data;
           document.getElementById('targetTTL').value = cfg.TARGET_TTL || 64;
           document.getElementById('tcpSplitToggle').checked = cfg.TCP_SPLIT === "1" || cfg.TCP_SPLIT === true;
           document.getElementById('splitPos').value = cfg.SPLIT_POS || 2;
@@ -331,13 +395,7 @@
       };
 
       try {
-        const res = await fetch('/api/config', {
-          method: 'POST',
-          headers: SHIELD_TOKEN
-            ? { 'Content-Type': 'application/json', 'X-Shield-Token': SHIELD_TOKEN }
-            : { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body)
-        });
+        const res = await apiSaveConfig(body);
         if (res.ok) {
           showToast('✅ Settings applied and DoH reloaded!');
         } else if (res.status === 403) {

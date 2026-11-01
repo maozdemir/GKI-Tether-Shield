@@ -13,9 +13,9 @@ func TestFetchStatusPrettyPrintsLiveStats(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(statsHandler))
 	defer srv.Close()
 
-	out, err := fetchStatus(srv.URL + "/api/stats")
+	out, err := apiRequest(http.MethodGet, srv.URL+"/api/stats", "")
 	if err != nil {
-		t.Fatalf("fetchStatus: %v", err)
+		t.Fatalf("apiRequest: %v", err)
 	}
 	for _, want := range []string{`"total_packets"`, `"doh_provider"`, "\n  "} {
 		if !strings.Contains(out, want) {
@@ -29,7 +29,7 @@ func TestFetchStatusReportsUnreachableDaemon(t *testing.T) {
 	url := srv.URL
 	srv.Close() // nothing listens any more
 
-	if _, err := fetchStatus(url + "/api/stats"); err == nil {
+	if _, err := apiRequest(http.MethodGet, url+"/api/stats", ""); err == nil {
 		t.Fatal("expected an error when the daemon is not running")
 	}
 }

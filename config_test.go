@@ -88,3 +88,19 @@ func TestConfigConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestSplitModeParsingAndUpdates(t *testing.T) {
+	if got := parseConfig(defaultConfig, strings.NewReader("SPLIT_MODE=FIXED\n")); got.SplitMode != splitModeFixed {
+		t.Fatalf("SPLIT_MODE=FIXED -> %q", got.SplitMode)
+	}
+	if got := parseConfig(defaultConfig, strings.NewReader("SPLIT_MODE=sideways\n")); got.SplitMode != splitModeAuto {
+		t.Fatalf("invalid SPLIT_MODE must keep the default, got %q", got.SplitMode)
+	}
+	if _, err := applyConfigUpdate(defaultConfig, map[string]any{"SPLIT_MODE": "sideways"}); err == nil {
+		t.Fatal("invalid SPLIT_MODE must be rejected by the API")
+	}
+	next, err := applyConfigUpdate(defaultConfig, map[string]any{"SPLIT_MODE": "fixed"})
+	if err != nil || next.SplitMode != splitModeFixed {
+		t.Fatalf("SPLIT_MODE update: %+v, %v", next, err)
+	}
+}

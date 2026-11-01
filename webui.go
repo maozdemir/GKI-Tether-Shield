@@ -62,6 +62,14 @@ func applyConfigUpdate(base Config, update map[string]any) (Config, error) {
 	if f, ok := update["SPLIT_POS"].(float64); ok && f > 0 && f < 100 {
 		next.SplitPos = int(f)
 	}
+	if v, ok := update["SPLIT_MODE"]; ok {
+		s, _ := v.(string)
+		mode, valid := parseSplitMode(s)
+		if !valid {
+			return base, fmt.Errorf("SPLIT_MODE must be %q or %q", splitModeAuto, splitModeFixed)
+		}
+		next.SplitMode = mode
+	}
 	boolFields := map[string]*bool{
 		"TCP_SPLIT":            &next.TcpSplit,
 		"BUFFERBLOAT_QOS":      &next.BufferbloatQoS,

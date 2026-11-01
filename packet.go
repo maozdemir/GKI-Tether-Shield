@@ -114,6 +114,15 @@ func isWebSplitCandidate(payload []byte) bool {
 	return isTLSClientHello(tcpPayload) || isHTTPRequest(tcpPayload)
 }
 
+// ipv4SplitPosition picks the split offset within the TCP payload.
+func ipv4SplitPosition(payload []byte, c *Config) int {
+	ihl, tcphl, ok := ipv4TCPHeaderLens(payload)
+	if !ok {
+		return c.SplitPos
+	}
+	return splitPosition(payload[ihl+tcphl:], c.SplitMode, c.SplitPos)
+}
+
 func splitAndSendIPv4TCP(rawFd int, payload []byte, splitPos int, ttl uint8) bool {
 	ihl, tcphl, ok := ipv4TCPHeaderLens(payload)
 	if !ok {
@@ -222,7 +231,7 @@ func handleIPv4(payload []byte, rawFd int, c *Config, verdict func(uint32, []byt
 	atomic.AddUint64(&ipv4Packets, 1)
 
 	if c.TcpSplit && rawFd > 0 && isWebSplitCandidate(payload) &&
-		splitAndSendIPv4TCP(rawFd, payload, c.SplitPos, c.TargetTTL) {
+		splitAndSendIPv4TCP(rawFd, payload, ipv4SplitPosition(payload, c), c.TargetTTL) {
 		atomic.AddUint64(&tcpSplitPkts, 1)
 		atomic.AddUint64(&ttlModified, 1)
 		verdict(NF_DROP, nil)

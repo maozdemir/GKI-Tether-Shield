@@ -26,25 +26,25 @@ import (
 var webUIHTML []byte
 
 const (
-	NETLINK_NETFILTER  = 12
-	NFNL_SUBSYS_QUEUE  = 3
+	NETLINK_NETFILTER = 12
+	NFNL_SUBSYS_QUEUE = 3
 
-	NFQNL_MSG_PACKET   = 0
-	NFQNL_MSG_VERDICT  = 1
-	NFQNL_MSG_CONFIG   = 2
+	NFQNL_MSG_PACKET  = 0
+	NFQNL_MSG_VERDICT = 1
+	NFQNL_MSG_CONFIG  = 2
 
-	NFQA_PACKET_HDR    = 1
-	NFQA_VERDICT_HDR   = 2
-	NFQA_PAYLOAD       = 10
+	NFQA_PACKET_HDR  = 1
+	NFQA_VERDICT_HDR = 2
+	NFQA_PAYLOAD     = 10
 
 	NFQNL_CFG_CMD_BIND   = 1
 	NFQNL_CFG_CMD_UNBIND = 2
 	NFQNL_COPY_PACKET    = 2
 
-	NF_ACCEPT          = 1
-	NF_DROP            = 0
+	NF_ACCEPT = 1
+	NF_DROP   = 0
 
-	NLM_F_REQUEST      = 1
+	NLM_F_REQUEST = 1
 
 	SOL_NETLINK        = 270
 	NETLINK_NO_ENOBUFS = 5
@@ -75,15 +75,15 @@ func getWebrootFile() string {
 }
 
 type Config struct {
-	QueueNum           uint16 `json:"QUEUE_NUM"`
-	TargetTTL          uint8  `json:"TARGET_TTL"`
-	TcpSplit           bool   `json:"TCP_SPLIT"`
-	SplitPos           int    `json:"SPLIT_POS"`
-	BufferbloatQoS     bool   `json:"BUFFERBLOAT_QOS"`
-	WifiPowerSaveLock  bool   `json:"WIFI_POWER_SAVE_LOCK"`
-	TcpLowLatency      bool   `json:"TCP_LOW_LATENCY"`
-	DohEnabled         bool   `json:"DOH_ENABLED"`
-	DohProvider        string `json:"DOH_PROVIDER"`
+	QueueNum          uint16 `json:"QUEUE_NUM"`
+	TargetTTL         uint8  `json:"TARGET_TTL"`
+	TcpSplit          bool   `json:"TCP_SPLIT"`
+	SplitPos          int    `json:"SPLIT_POS"`
+	BufferbloatQoS    bool   `json:"BUFFERBLOAT_QOS"`
+	WifiPowerSaveLock bool   `json:"WIFI_POWER_SAVE_LOCK"`
+	TcpLowLatency     bool   `json:"TCP_LOW_LATENCY"`
+	DohEnabled        bool   `json:"DOH_ENABLED"`
+	DohProvider       string `json:"DOH_PROVIDER"`
 }
 
 var cfg = Config{
@@ -631,7 +631,7 @@ func splitAndSendIPv4TCP(rawFd int, payload []byte, splitPos int) bool {
 	if len(payload) < ihl+20 {
 		return false
 	}
-	tcphl := int((payload[ihl+12] >> 4) & 0x0F) * 4
+	tcphl := int((payload[ihl+12]>>4)&0x0F) * 4
 	headerLen := ihl + tcphl
 	dataLen := len(payload) - headerLen
 
@@ -826,7 +826,7 @@ func main() {
 
 				for attrOffset+4 <= attrEnd {
 					aLen := int(binary.LittleEndian.Uint16(recvBuf[attrOffset : attrOffset+2]))
-					aType := binary.LittleEndian.Uint16(recvBuf[attrOffset+2 : attrOffset+4]) & 0x7fff
+					aType := binary.LittleEndian.Uint16(recvBuf[attrOffset+2:attrOffset+4]) & 0x7fff
 					if aLen < 4 || attrOffset+aLen > attrEnd {
 						break
 					}
@@ -857,7 +857,7 @@ func main() {
 							isWebPort := (dstPort == 80 || dstPort == 443 || dstPort == 8080 || dstPort == 8443)
 
 							if isWebPort {
-								tcphl := int((payload[ihl+12] >> 4) & 0x0F) * 4
+								tcphl := int((payload[ihl+12]>>4)&0x0F) * 4
 								tcpPayload := payload[ihl+tcphl:]
 								if isTLSClientHello(tcpPayload) || isHTTPRequest(tcpPayload) {
 									if splitAndSendIPv4TCP(rawFd, payload, cfg.SplitPos) {

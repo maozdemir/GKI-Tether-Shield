@@ -125,6 +125,15 @@
     .opt { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 16px; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--rule); }
     .opt label, .opt .label { font: 600 19px/1.2 var(--display); }
     .opt .hint { grid-column: 1; color: var(--muted); font-size: 13px; max-width: 46ch; }
+    .opt .more { grid-column: 1 / -1; margin-top: 4px; }
+    .opt .more summary { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none;
+      font-size: 13px; font-weight: 600; color: var(--ink); text-decoration: underline; text-decoration-color: var(--rule);
+      text-underline-offset: 3px; padding: 6px 0; min-height: 32px; }
+    .opt .more summary::-webkit-details-marker { display: none; }
+    .opt .more summary::after { content: "+"; font-weight: 700; }
+    .opt .more[open] summary::after { content: "\2212"; }
+    .opt .more summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 4px; }
+    .opt .more p { margin: 0 0 8px; font-size: 14px; line-height: 1.5; color: var(--ink); max-width: 62ch; }
     .opt .err { grid-column: 1 / 3; color: var(--alert); font-size: 13px; font-weight: 600; }
     .opt[aria-disabled="true"] { opacity: .5; }
     input[type="number"], select { font: 800 20px/1 var(--display); color: var(--ink); background: var(--field);
@@ -221,20 +230,20 @@
 
         <h2 id="shield">Shield</h2>
         <p class="lede">How tethered traffic is disguised.</p>
-        <div class="opt"><label for="targetTTL">Target TTL</label><input type="number" id="targetTTL" min="1" max="255" inputmode="numeric"><span class="hint">Outgoing TTL and IPv6 hop limit. 64 matches Android itself.</span><span class="err" id="ttlErr" hidden>Enter a number from 1 to 255.</span></div>
-        <div class="opt"><label for="tcpSplitToggle">Split TLS and HTTP handshakes</label><input type="checkbox" role="switch" class="switch" id="tcpSplitToggle"><span class="hint">Hides the server name from deep packet inspection.</span></div>
+        <div class="opt"><label for="targetTTL">Target TTL</label><input type="number" id="targetTTL" min="1" max="255" inputmode="numeric"><span class="hint">Outgoing TTL and IPv6 hop limit. 64 matches Android itself.</span><span class="err" id="ttlErr" hidden>Enter a number from 1 to 255.</span><details class="more"><summary>What it does</summary><p>Carriers spot tethering by the TTL (IPv4) or hop limit (IPv6) of your traffic. A laptop sends with 64 or 128, and each hop through the phone lowers it by one, so hotspot packets arrive at the carrier as 63 or 127 while the phone's own say 64.</p><p>The shield rewrites every packet leaving on mobile data to this value, so hotspot traffic looks like the phone's own. Leave it at 64 unless your carrier expects another value. Changes apply live.</p></details></div>
+        <div class="opt"><label for="tcpSplitToggle">Split TLS and HTTP handshakes</label><input type="checkbox" role="switch" class="switch" id="tcpSplitToggle"><span class="hint">Hides the server name from deep packet inspection.</span><details class="more"><summary>What it does</summary><p>Deep packet inspection (DPI) reads the site name in the first packet of a web connection: the TLS server name (SNI) for HTTPS, or the Host header for plain HTTP. Carriers use it to throttle or flag hotspot traffic.</p><p>When on, the shield cuts that first packet into two TCP segments, so no single packet holds the whole name. The server joins them back as normal. Only the first few packets of connections to ports 80 and 443 are touched, so downloads and streaming are not slowed.</p></details></div>
         <div class="opt" id="optSplitMode"><span class="label" id="splitModeLabel">Where to split</span>
           <div class="seg" role="radiogroup" aria-labelledby="splitModeLabel">
             <input type="radio" name="splitMode" id="splitAuto" value="auto"><label for="splitAuto">In the name</label>
             <input type="radio" name="splitMode" id="splitFixed" value="fixed"><label for="splitFixed">Fixed byte</label>
           </div>
-          <span class="hint">"In the name" splits inside the TLS SNI or HTTP Host.</span></div>
-        <div class="opt" id="optSplitPos"><label for="splitPos" id="splitPosLabel">Fallback split byte</label><input type="number" id="splitPos" min="1" max="99" inputmode="numeric"><span class="hint" id="splitPosHint">Used when the name is not in the first packet.</span><span class="err" id="posErr" hidden>Enter a number from 1 to 99.</span></div>
-        <div class="opt" id="optQuic"><label for="quicToggle">Block HTTP/3 (QUIC)</label><input type="checkbox" role="switch" class="switch" id="quicToggle"><span class="hint" id="quicHint">QUIC can't be split; blocking it makes browsers use TCP.</span></div>
+          <span class="hint">"In the name" splits inside the TLS SNI or HTTP Host.</span><details class="more"><summary>What it does</summary><p><b>In the name</b> cuts the packet in the middle of the server name itself, so each half carries only part of it. This beats DPI that matches whole names, and is the recommended choice.</p><p><b>Fixed byte</b> always cuts at the byte below, counted from the start of the packet's data. Try it if a site or network misbehaves with the default.</p></details></div>
+        <div class="opt" id="optSplitPos"><label for="splitPos" id="splitPosLabel">Fallback split byte</label><input type="number" id="splitPos" min="1" max="99" inputmode="numeric"><span class="hint" id="splitPosHint">Used when the name is not in the first packet.</span><span class="err" id="posErr" hidden>Enter a number from 1 to 99.</span><details class="more"><summary>What it does</summary><p>The byte offset, from the start of the packet's data, where the packet is cut. In Fixed byte mode it is always used. In In the name mode it is used only when the name isn't found in the first packet, for example when the TLS hello spans two packets.</p><p>Small values (1 to 5) cut inside the TLS record header, which confuses most DPI. The default is 2.</p></details></div>
+        <div class="opt" id="optQuic"><label for="quicToggle">Block HTTP/3 (QUIC)</label><input type="checkbox" role="switch" class="switch" id="quicToggle"><span class="hint" id="quicHint">QUIC can't be split; blocking it makes browsers use TCP.</span><details class="more"><summary>What it does</summary><p>Browsers and apps such as YouTube prefer HTTP/3, which runs over QUIC on UDP port 443. QUIC's first packet also carries the server name, and it can't be split like TCP.</p><p>When on, outgoing UDP 443 from the phone and hotspot clients is refused right away, so browsers fall back to TCP (HTTP/2), where splitting works. Off by default: HTTP/3 is often faster on lossy mobile links, and a few apps and games need UDP 443. Turn it on if sites still get throttled with splitting on. Only applies while splitting is on.</p></details></div>
 
         <h2 id="dns">DNS</h2>
         <p class="lede">Lookups from hotspot clients.</p>
-        <div class="opt"><label for="dohToggle">Encrypt DNS (DoH)</label><input type="checkbox" role="switch" class="switch" id="dohToggle"><span class="hint">When off, lookups go to 1.1.1.1 in plain text.</span></div>
+        <div class="opt"><label for="dohToggle">Encrypt DNS (DoH)</label><input type="checkbox" role="switch" class="switch" id="dohToggle"><span class="hint">When off, lookups go to 1.1.1.1 in plain text.</span><details class="more"><summary>What it does</summary><p>Hotspot clients' DNS lookups are answered by the shield. When this is on, it forwards them over HTTPS (DoH) to the provider below, so the carrier can't read, log or rewrite them. Answers are cached on the phone for as long as each record allows.</p><p>If the provider can't be reached, lookups fall back to plain DNS at 1.1.1.1 so browsing keeps working, and this page shows DNS as degraded. When off, every lookup goes to 1.1.1.1 in plain text.</p></details></div>
         <div class="opt" id="optProvider"><label for="dohProvider">Provider</label>
           <select id="dohProvider">
             <option value="cloudflare">Cloudflare</option>
@@ -242,13 +251,13 @@
             <option value="google">Google</option>
             <option value="adguard">AdGuard</option>
           </select>
-          <span class="hint">Quad9 blocks malware domains; AdGuard blocks ads.</span></div>
+          <span class="hint">Quad9 blocks malware domains; AdGuard blocks ads.</span><details class="more"><summary>What it does</summary><p><b>Cloudflare</b> (1.1.1.1): fast, no filtering. <b>Quad9</b> (9.9.9.9): blocks known malware and phishing domains. <b>Google</b> (8.8.8.8): no filtering. <b>AdGuard</b> (94.140.14.14): blocks ads and trackers.</p><p>The shield connects to the provider's fixed address and verifies its certificate, so reaching it needs no lookup of its own.</p></details></div>
 
         <h2 id="network">Network</h2>
         <p class="lede">Latency and battery while the hotspot is on.</p>
-        <div class="opt"><label for="qosToggle">Fair queueing (fq_codel)</label><input type="checkbox" role="switch" class="switch" id="qosToggle"><span class="hint">Keeps ping low while someone downloads.</span></div>
-        <div class="opt"><label for="batteryGuardToggle">Keep Wi-Fi awake</label><input type="checkbox" role="switch" class="switch" id="batteryGuardToggle"><span class="hint">Turns off Wi-Fi power saving only while the hotspot is on.</span></div>
-        <div class="opt"><label for="lowLatencyToggle">Low-latency TCP</label><input type="checkbox" role="switch" class="switch" id="lowLatencyToggle"><span class="hint">Sends small writes immediately instead of batching them.</span></div>
+        <div class="opt"><label for="qosToggle">Fair queueing (fq_codel)</label><input type="checkbox" role="switch" class="switch" id="qosToggle"><span class="hint">Keeps ping low while someone downloads.</span><details class="more"><summary>What it does</summary><p>Without it, a big download or upload fills the network buffers and every other packet waits behind it, so calls, games and pages lag.</p><p>When on and the hotspot is active, the shield puts the fq_codel queue on the hotspot and mobile data interfaces. It gives each connection a fair turn and drops packets early, before buffers fill, so latency stays low under load. It is removed when the hotspot stops.</p></details></div>
+        <div class="opt"><label for="batteryGuardToggle">Keep Wi-Fi awake</label><input type="checkbox" role="switch" class="switch" id="batteryGuardToggle"><span class="hint">Turns off Wi-Fi power saving only while the hotspot is on.</span><details class="more"><summary>What it does</summary><p>Wi-Fi power saving lets the radio sleep between beacons, which adds latency spikes and jitter for devices on your hotspot.</p><p>When on, the shield turns power saving off on the Wi-Fi interfaces while the hotspot is active and turns it back on when the hotspot stops. It uses a little more battery while sharing.</p></details></div>
+        <div class="opt"><label for="lowLatencyToggle">Low-latency TCP</label><input type="checkbox" role="switch" class="switch" id="lowLatencyToggle"><span class="hint">Sends small writes immediately instead of batching them.</span><details class="more"><summary>What it does</summary><p>Changes three kernel TCP settings: connections resume at full speed after being idle, less unsent data waits in each socket, and small writes go out at once instead of being batched.</p><p>These affect connections the phone makes itself, such as the phone's apps and its encrypted DNS, not traffic forwarded for hotspot clients. The original values come back when you turn it off.</p></details></div>
 
         <p class="fine">Counts start when the service starts. Saved settings apply within 10 seconds, no reboot needed. This page sends nothing off the phone except the update check.
           <a href="https://github.com/maozdemir/GKI-Tether-Shield" target="_blank" rel="noopener">Source</a> ·
@@ -533,6 +542,7 @@
       TCP_SPLIT: 'tcpSplitToggle', BLOCK_QUIC: 'quicToggle', DOH_ENABLED: 'dohToggle',
       BUFFERBLOAT_QOS: 'qosToggle', WIFI_POWER_SAVE_LOCK: 'batteryGuardToggle', TCP_LOW_LATENCY: 'lowLatencyToggle'
     };
+    const DEFAULT_OFF = new Set(['BLOCK_QUIC']);
     const isOn = (v) => v === true || v === '1' || v === 'true';
     let savedBody = null;
 
@@ -607,7 +617,8 @@
         (cfg.SPLIT_MODE === 'fixed' ? $('splitFixed') : $('splitAuto')).checked = true;
         if (cfg.DOH_PROVIDER) $('dohProvider').value = cfg.DOH_PROVIDER;
         for (const [key, id] of Object.entries(SWITCHES)) {
-          $(id).checked = cfg[key] === undefined ? true : isOn(cfg[key]); // all default on
+          // Missing keys (older config.conf) take the daemon's defaults.
+          $(id).checked = cfg[key] === undefined ? !DEFAULT_OFF.has(key) : isOn(cfg[key]);
         }
         savedBody = readForm();
         onFormChange();
@@ -645,7 +656,8 @@
       const inc = document.createElement('span');
       inc.className = 'inc';
       inc.setAttribute('aria-hidden', 'true'); // the switch itself announces its state
-      $(id).closest('.opt').append(inc);
+      const opt = $(id).closest('.opt');
+      opt.insertBefore(inc, opt.querySelector('.more'));
     }
     document.querySelectorAll('.sheet input, .sheet select').forEach((el) => {
       el.addEventListener('input', onFormChange);

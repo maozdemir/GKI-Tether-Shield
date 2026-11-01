@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/cilium/ebpf"
+	"golang.org/x/sys/unix"
 )
 
 // tcActUnspec is TC_ACT_UNSPEC (-1) as the program's return value.
@@ -41,11 +42,17 @@ func ipv4Checksum(h []byte) uint16 {
 	return ^uint16(sum)
 }
 
+// testPayload is the UDP header plus payload size of test packets. It keeps
+// packets complete even when the kernel's test runner strips an assumed
+// Ethernet header from a raw-IP packet: newer kernels refuse a truncated IP
+// packet there with EINVAL before running the program.
+const testPayload = 8 + 40
+
 // testIPv4 builds an IPv4/UDP packet with a valid header checksum. ihl is
 // the header length in 32-bit words (5 = no options).
 func testIPv4(ttl uint8, ihl int, src [4]byte) []byte {
 	hlen := ihl * 4
-	p := make([]byte, hlen+8+4)
+	p := make([]byte, hlen+testPayload)
 	p[0] = 0x40 | byte(ihl)
 	binary.BigEndian.PutUint16(p[2:], uint16(len(p)))
 	p[8] = ttl
@@ -60,9 +67,9 @@ func testIPv4(ttl uint8, ihl int, src [4]byte) []byte {
 }
 
 func testIPv6(hlim uint8, src [16]byte) []byte {
-	p := make([]byte, 40+8)
+	p := make([]byte, 40+testPayload)
 	p[0] = 0x60
-	binary.BigEndian.PutUint16(p[4:], 8)
+	binary.BigEndian.PutUint16(p[4:], testPayload)
 	p[6] = 17
 	p[7] = hlim
 	copy(p[8:24], src[:])
@@ -173,8 +180,16 @@ func TestEBPFIgnoresOtherAndBrokenPackets(t *testing.T) {
 		"Ethernet header only": ethFrame(0x0800, nil),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if out := run(t, p.eth, frame); !bytes.Equal(out, frame) {
-				t.Fatal("packet was modified")
+			opts := &ebpf.RunOptions{Data: frame, DataOut: make([]byte, len(frame)+256)}
+			ret, err := p.eth.Run(opts)
+			if errors.Is(err, unix.EINVAL) {
+				t.Skip("this kernel's test runner refuses the malformed packet before the program runs")
+			}
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if ret != tcActUnspec || !bytes.Equal(opts.DataOut, frame) {
+				t.Fatalf("returned %#x, packet modified: %v", ret, !bytes.Equal(opts.DataOut, frame))
 			}
 		})
 	}

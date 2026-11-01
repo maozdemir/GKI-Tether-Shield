@@ -56,9 +56,7 @@ func withPlainUpstream(t *testing.T, addr string) {
 
 func withDoHEnabled(t *testing.T, enabled bool) {
 	t.Helper()
-	orig := cfg.DohEnabled
-	cfg.DohEnabled = enabled
-	t.Cleanup(func() { cfg.DohEnabled = orig })
+	withConfig(t, func(c *Config) { c.DohEnabled = enabled })
 }
 
 func TestResolveDNSUsesPlainUpstreamWhenDoHDisabled(t *testing.T) {

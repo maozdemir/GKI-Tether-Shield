@@ -107,7 +107,7 @@ func configureAndroidCertDirs() {
 }
 
 func currentDoHProvider() dohProvider {
-	if p, ok := lookupDoHProvider(cfg.DohProvider); ok {
+	if p, ok := lookupDoHProvider(cfgSnapshot().DohProvider); ok {
 		return p
 	}
 	return dohProviders[defaultDoHProvider]
@@ -223,7 +223,7 @@ func resolveDoH(query []byte) ([]byte, error) {
 // port 53 here even when DoH is switched off, so queries must still be
 // answered (in plain DNS) rather than dropped.
 func resolveDNS(query []byte) ([]byte, error) {
-	if cfg.DohEnabled {
+	if cfgSnapshot().DohEnabled {
 		return resolveDoH(query)
 	}
 	return resolvePlainUDP(query)

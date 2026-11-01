@@ -57,6 +57,7 @@ var (
 )
 
 func writeStats() {
+	c := cfgSnapshot()
 	jsonContent := fmt.Sprintf(`{
   "total_packets": %d,
   "ipv4_packets": %d,
@@ -78,10 +79,10 @@ func writeStats() {
 		atomic.LoadUint64(&tcpSplitPkts),
 		atomic.LoadUint64(&dohQueries),
 		atomic.LoadUint64(&dnsCacheHits),
-		cfg.TargetTTL,
-		cfg.TcpSplit,
-		cfg.DohEnabled,
-		cfg.DohProvider,
+		c.TargetTTL,
+		c.TcpSplit,
+		c.DohEnabled,
+		c.DohProvider,
 		time.Now().Format(time.RFC3339),
 	)
 	if err := writeFileAtomic(getStatsPath(), []byte(jsonContent), 0o644); err != nil {
@@ -103,7 +104,8 @@ func main() {
 	_ = syscall.Setpriority(syscall.PRIO_PROCESS, 0, -20)
 
 	configureAndroidCertDirs()
-	loadConfig(getConfigPath())
+	setCfg(loadConfigFile(getConfigPath(), defaultConfig))
+	startCfg := cfgSnapshot()
 
 	// Start embedded DoH DNS Interceptor
 	startDNSServer()
@@ -112,7 +114,7 @@ func main() {
 	startHTTPServer()
 
 	fmt.Printf("Starting GKI Hotspot Shield (WebUI: %d, DoH DNS: %d, Target TTL: %d, TCP Split: %v)...\n",
-		WEB_PORT, DNS_PORT, cfg.TargetTTL, cfg.TcpSplit)
+		WEB_PORT, DNS_PORT, startCfg.TargetTTL, startCfg.TcpSplit)
 
 	rawFd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
 	if err == nil {
@@ -120,12 +122,12 @@ func main() {
 		defer syscall.Close(rawFd)
 	}
 
-	queues, err := openQueues(cfg.QueueNum, NUM_QUEUES)
+	queues, err := openQueues(startCfg.QueueNum, NUM_QUEUES)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "NFQUEUE setup failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("NFQUEUE initialized on queues %d-%d. Running...\n", cfg.QueueNum, cfg.QueueNum+NUM_QUEUES-1)
+	fmt.Printf("NFQUEUE initialized on queues %d-%d. Running...\n", startCfg.QueueNum, startCfg.QueueNum+NUM_QUEUES-1)
 
 	ticker := time.NewTicker(3 * time.Second)
 	go func() {
@@ -134,13 +136,19 @@ func main() {
 		}
 	}()
 
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
-		<-c
-		writeStats()
-		closeQueues(queues)
-		os.Exit(0)
+		for sig := range sigs {
+			if sig == syscall.SIGHUP {
+				// service.sh sends SIGHUP when config.conf changed on disk.
+				reloadConfig()
+				continue
+			}
+			writeStats()
+			closeQueues(queues)
+			os.Exit(0)
+		}
 	}()
 
 	errs := make(chan error, len(queues))
@@ -148,7 +156,7 @@ func main() {
 		go func(q *queueWorker) { errs <- q.run(rawFd) }(q)
 	}
 	// Any queue dying means its share of traffic bypasses TTL fixing, so exit
-	// and let the supervisor restart the daemon with all queues bound.
+	// and let the service.sh watchdog restart the daemon with all queues bound.
 	fmt.Fprintf(os.Stderr, "%v\n", <-errs)
 	closeQueues(queues)
 	os.Exit(1)

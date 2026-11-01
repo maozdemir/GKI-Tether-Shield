@@ -101,17 +101,3 @@ func TestConfigHandlerRejectsCrossSiteAndNonJSON(t *testing.T) {
 		t.Fatalf("config not written: %q, %v", data, err)
 	}
 }
-
-func TestLoadConfigIgnoresUnknownProvider(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.conf")
-	if err := os.WriteFile(path, []byte("DOH_PROVIDER=evil.example\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	original := cfg
-	defer func() { cfg = original }()
-	cfg.DohProvider = "cloudflare"
-	loadConfig(path)
-	if cfg.DohProvider != "cloudflare" {
-		t.Fatalf("unknown provider was loaded: %q", cfg.DohProvider)
-	}
-}

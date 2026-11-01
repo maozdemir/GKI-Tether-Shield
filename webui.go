@@ -109,7 +109,9 @@ func handleConfigPost(w http.ResponseWriter, r *http.Request, configPath func() 
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	next, err := applyConfigUpdate(cfg, update)
+	cfgWriteMu.Lock()
+	defer cfgWriteMu.Unlock()
+	next, err := applyConfigUpdate(*cfgSnapshot(), update)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
@@ -119,7 +121,7 @@ func handleConfigPost(w http.ResponseWriter, r *http.Request, configPath func() 
 		writeJSONError(w, http.StatusInternalServerError, "failed to save config")
 		return
 	}
-	cfg = next
+	setCfg(next)
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
@@ -129,7 +131,7 @@ func configHandler(configPath func() string) http.HandlerFunc {
 		switch r.Method {
 		case http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(cfg)
+			_ = json.NewEncoder(w).Encode(cfgSnapshot())
 		case http.MethodPost:
 			handleConfigPost(w, r, configPath)
 		default:
@@ -141,6 +143,7 @@ func configHandler(configPath func() string) http.HandlerFunc {
 
 func statsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	c := cfgSnapshot()
 	stats := map[string]any{
 		"total_packets":     atomic.LoadUint64(&totalPackets),
 		"ipv4_packets":      atomic.LoadUint64(&ipv4Packets),
@@ -149,10 +152,10 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 		"tcp_split_packets": atomic.LoadUint64(&tcpSplitPkts),
 		"doh_queries":       atomic.LoadUint64(&dohQueries),
 		"dns_cache_hits":    atomic.LoadUint64(&dnsCacheHits),
-		"target_ttl":        cfg.TargetTTL,
-		"tcp_split_enabled": cfg.TcpSplit,
-		"doh_enabled":       cfg.DohEnabled,
-		"doh_provider":      cfg.DohProvider,
+		"target_ttl":        c.TargetTTL,
+		"tcp_split_enabled": c.TcpSplit,
+		"doh_enabled":       c.DohEnabled,
+		"doh_provider":      c.DohProvider,
 		"version":           MODULE_VERSION,
 		"version_code":      MODULE_VERSION_CODE,
 		"updated_at":        time.Now().Format(time.RFC3339),

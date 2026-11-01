@@ -42,9 +42,9 @@ iptables: No chain/target/match by that name.
 
 Furthermore, legacy C-based modules relied on inspecting standard Linux routing table 254 (`main`). Since Android 12+, mobile data routes reside in dynamic policy routing tables (`table 1000+`), causing older tools to assign gateway index 0, drop packets, or silently leak untamed client TTLs (128 / 127) to mobile carriers.
 
-Lastly, legacy userspace daemons intercept all packets indiscriminately, creating massive CPU context-switch bottlenecks that throttle high-speed 5G tethering and corrupt BitTorrent/P2P transfers.
+Lastly, legacy userspace daemons ran a single-threaded queue and modified payloads indiscriminately, throttling high-speed 5G tethering and corrupting BitTorrent/P2P transfers.
 
-**GKI-Tether-Shield** solves this natively without requiring custom kernel builds by coupling high-performance in-kernel selective matching with a real-time pure Go engine.
+**GKI-Tether-Shield** solves this without custom kernel builds: iptables only *selects* packets (`-m ttl` / `-m hl` matches, which GKI still ships) and hands them to NFQUEUE, where a multi-core Go daemon rewrites TTL / Hop Limit and fixes checksums.
 
 ---
 
@@ -54,44 +54,49 @@ Lastly, legacy userspace daemons intercept all packets indiscriminately, creatin
 | :--- | :--- | :--- |
 | **Carrier Hotspot Quota** | Consumes separate tethering cap; throttled to 128 Kbps | **Bypassed completely**; treated as phone's native data via real-time TTL=64 |
 | **Deep Packet Inspection (DPI)** | ISPs detect desktop OS & throttle/censor websites via SNI | **Bypassed** via GoodbyeDPI / Zapret TLS ClientHello TCP segmentation |
-| **DNS Privacy & Hijacking** | ISP snoops, hijacks, or poisons unencrypted port 53 DNS | **100% Encrypted** via TLS 1.3 DNS-over-HTTPS (Cloudflare / Quad9 / AdGuard) |
+| **DNS Privacy & Hijacking** | ISP snoops, hijacks, or poisons unencrypted port 53 DNS | **Encrypted, certificate-verified** DNS-over-HTTPS for IPv4 and IPv6 clients (Cloudflare / Quad9 / Google / AdGuard) |
 | **Bufferbloat / Gaming Ping** | Ping spikes to 300+ ms when someone streams video | **Flat 20-30 ms ping** under load via Fair Queueing (`fq_codel` QoS) |
 | **Wi-Fi Latency (Screen Off)** | High jitter and packet drops caused by Wi-Fi power saving | **Locked to low latency** during active hotspot; powersave restored on idle |
-| **BitTorrent & P2P Speed** | Stalls or drops due to userspace queue saturation | **100% In-kernel line rate acceleration** with enlarged conntrack table |
+| **BitTorrent & P2P Speed** | Stalls or drops due to userspace queue saturation | Payload never touched (only TTL); **4 parallel queue workers** with fail-open queues and an enlarged conntrack table |
+| **Chipset Support** | Hardcoded to Qualcomm `rmnet` interfaces | **Any modem** (Qualcomm, MediaTek, Exynos, Tensor, Unisoc, 464XLAT/CLAT): rules key off downstream interfaces, not modem names |
 | **Configuration Interface** | Complex terminal commands or clunky drawer apps | **Zero-Icon Native Manager App** launched directly via Magisk Action button |
-| **Module Updates** | Manual downloading from GitHub & flashing | **1-Click Native Auto-Update** directly in Magisk / KernelSU / APatch / MMRL |
+| **Module Updates** | Manual downloading from GitHub & flashing | **1-Click Native Auto-Update** directly in Magisk / KernelSU / APatch / MMRL; your settings are kept |
 
 ---
 
 ## 🚀 Key Architectural Features
 
-### 1. ⚡ Real-Time Hardware-Accelerated TTL Normalization
-- Normalizes IPv4 TTL and IPv6 Hop Limit to `64` in microseconds.
-- Uses selective kernel-level matching (`-m ttl ! --ttl-eq 64`): packets already matching TTL 64 stay **100% in-kernel**, eliminating 95%+ of userspace context-switch overhead.
-- Automatically recalculates IPv4 header checksums on modified packets.
+### 1. ⚡ Real-Time TTL / Hop Limit Normalization
+- Normalizes IPv4 TTL and IPv6 Hop Limit of outgoing packets to `TARGET_TTL` (default `64`).
+- GKI has no `TTL` target, so iptables only selects packets (`-m ttl ! --ttl-eq 64`, `-m hl ! --hl-eq 64`) and NFQUEUE hands them to the daemon. The phone's own traffic already leaves with TTL 64 and stays in-kernel; forwarded hotspot traffic (TTL 63/127 after routing) is rewritten by the daemon.
+- Packets are spread over **4 NFQUEUE workers** by flow hash (multi-core, per-flow order preserved), with **fail-open** queues: if the daemon falls behind, packets pass instead of being dropped.
+- **Works on every SoC:** instead of guessing the modem's interface name (`rmnet*`, `ccmni*`, `seth_lte*`, `v4-*` CLAT, ...), every egress interface except known hotspot/USB/Ethernet downstreams is treated as upstream.
+- Recalculates IPv4 header checksums; a watchdog restarts the daemon if it ever stops.
 
 ### 2. 🛡️ GoodbyeDPI / Zapret TLS ClientHello TCP Segmentation
 - Inspects initial HTTPS TLS ClientHello (SNI) and HTTP cleartext requests.
 - Splits TCP payloads into segments at byte-level using raw socket injection.
-- Evades carrier DPI middleboxes, domain filtering, and passive OS fingerprinting (`p0f`) across all tethered clients (Windows, macOS, iOS, Android, Linux, PlayStation, Xbox).
-- **Isolated to Web Ports (80, 443, 8080, 8443):** Non-web protocols (BitTorrent, gaming UDP, custom ports) stay in-kernel, preventing protocol corruption.
+- Evades SNI-based DPI middleboxes and domain filtering for all tethered clients (Windows, macOS, iOS, Android, Linux, consoles).
+- **Isolated to Web Ports (80, 443, 8080, 8443):** non-web protocols (BitTorrent, gaming UDP, custom ports) are never split, preventing protocol corruption.
+- Only the first 6 packets of each web connection are inspected (`connbytes`), so streaming and downloads skip DPI processing.
 
 ### 3. 🔒 Transparent Encrypted DNS-over-HTTPS (DoH Proxy)
-- Transparently intercepts unencrypted UDP & TCP port 53 queries from tethered devices.
-- Resolves queries over encrypted **TLS 1.3 / HTTPS** (RFC 8484) with direct IP dialing to prevent bootstrap DNS loops.
+- Transparently intercepts unencrypted UDP & TCP port 53 queries from tethered devices, over IPv4 and IPv6.
+- Resolves queries over **HTTPS (RFC 8484) with verified TLS certificates**, dialing each provider's pinned IP directly to avoid bootstrap DNS loops.
+- Only hotspot clients can reach the proxy; it is never exposed on the mobile network.
 - Supported providers:
   - **Cloudflare** (`1.1.1.1`)
   - **Quad9 Security** (`9.9.9.9` - malware & phishing protection)
   - **Google DNS** (`8.8.8.8`)
   - **AdGuard DNS** (`94.140.14.14` - network-wide ad & tracker blocking)
-- **Ultra-fast In-Memory Cache:** Repeated domain lookups resolve locally in `<0.2 ms`.
-- **Automatic Fallback:** Gracefully falls back to UDP 1.1.1.1:53 if upstream DoH fails, ensuring zero connection drops.
+- **In-Memory Cache:** honors record TTLs (5 s – 5 min), never caches failures, and merges identical concurrent lookups.
+- **Automatic Fallback:** if DoH fails (or DoH is switched off), queries fall back to plain UDP `1.1.1.1:53` so name resolution keeps working. Fallback queries are **not encrypted**.
 - **Zero Configuration:** Tethered devices require no manual DNS setup.
 
 ### 4. 🎮 Anti-Bufferbloat Fair Queueing (`fq_codel` QoS)
-- Applies Fair Queueing with Controlled Delay (`fq_codel`) on active cellular and Wi-Fi interfaces.
+- Applies Fair Queueing with Controlled Delay (`fq_codel`) on the hotspot interfaces and the actual uplink (taken from Android's tethering NAT rule) while the hotspot is active, and removes it afterwards.
 - Dynamically separates latency-sensitive gaming packets (low-payload UDP) from bulk downloads and 4K video streams, preventing ping spikes under heavy load.
-- Kernel sysctl network optimizations (`tcp_notsent_lowat=16384`, `tcp_slow_start_after_idle=0`, enlarged `nf_conntrack_max=262144`).
+- Optional low-latency TCP sysctls (`tcp_notsent_lowat=16384`, `tcp_slow_start_after_idle=0`, `tcp_autocorking=0`; original values restored when disabled) and an enlarged `nf_conntrack_max=262144`.
 
 ### 5. 🔋 Smart Hotspot-Aware Wi-Fi Battery Guard
 - Automatically disables Wi-Fi power saving (`power_save off`) **only** while mobile hotspot is actively transmitting.
@@ -99,12 +104,18 @@ Lastly, legacy userspace daemons intercept all packets indiscriminately, creatin
 
 ### 6. 📲 Carrier DUN & Entitlement Bypass
 - Automatically resets carrier entitlement flags: `tether_dun_required=0`, `net.tethering.noprovisioning=true`, and `tether_entitlement_check_state=0`.
-- Enforces kernel default TTL values: `net.ipv4.ip_default_ttl=64` and `net.ipv6.conf.all.hop_limit=64`.
+- Enforces kernel default TTL values (`net.ipv4.ip_default_ttl`, `net.ipv6.conf.all.hop_limit`) to `TARGET_TTL`.
 
-### 7. 🔄 Native 1-Click Auto-Update (`update.json`)
+### 7. 🔐 Locked-Down Local Control
+- The dashboard API only listens on `127.0.0.1` and rejects cross-site requests and DNS rebinding.
+- Settings can only be changed by the companion app, root or ADB shell (checked by the caller's Linux UID); the browser fallback uses a per-boot token. Other apps can read the dashboard but not change it.
+- Daemon logs go to a size-capped `daemon.log` in the module directory.
+
+### 8. 🔄 Native 1-Click Auto-Update (`update.json`)
 - Fully compliant with **Magisk**, **KernelSU**, **APatch**, and **MMRL** update specifications.
 - Automatically checks for updates and renders a 1-click update button inside your root manager app.
 - Embedded Companion WebUI and native manager dynamically check for updates and notify you when new releases are published.
+- Your `config.conf` is carried over on every update.
 
 ---
 
@@ -126,8 +137,8 @@ GKI-Tether-Shield includes a modern configuration interface designed to never cl
 ### 4. Command-Line Interface (`ttlshield`)
 - Run commands directly as root in Termux or an ADB shell:
   ```bash
-  su -c ttlshield status     # View real-time packet counters and active settings
-  su -c ttlshield log        # Dump raw JSON statistics
+  su -c ttlshield status     # Live packet counters, settings and version
+  su -c ttlshield log        # Last daemon log lines (and crash output, if any)
   su -c ttlshield restart    # Restart the background daemon
   ```
 
@@ -135,24 +146,26 @@ GKI-Tether-Shield includes a modern configuration interface designed to never cl
 
 ## ⚙️ Configuration (`config.conf`)
 
-Settings can be toggled in real-time either via the **In-App Manager**, **WebUI**, or by editing `/data/adb/modules/gki_hotspot_shield/config.conf`:
+Settings can be changed in the **In-App Manager** / **WebUI**, or by editing `/data/adb/modules/gki_hotspot_shield/config.conf`. Edits are picked up automatically within ~10 seconds (no reboot). Comments must be on their own line.
 
 ```ini
 # ==========================================
 # GKI-Tether-Shield Configuration
 # ==========================================
 
-# Target TTL & Hop Limit (Default: 64)
+# Target TTL & Hop Limit (Default: 64, range 1-255)
 TARGET_TTL=64
 
 # DPI Evasion / TCP Segmentation (Zapret / GoodbyeDPI mode)
 TCP_SPLIT=1
 SPLIT_POS=2
+# First of 4 consecutive NFQUEUE numbers (6464-6467); change only on conflicts
 QUEUE_NUM=6464
 
 # Transparent Encrypted DNS (DNS-over-HTTPS)
 DOH_ENABLED=1
-DOH_PROVIDER=cloudflare   # Options: cloudflare, quad9, google, adguard
+# Options: cloudflare, quad9, google, adguard
+DOH_PROVIDER=cloudflare
 
 # Anti-Bufferbloat QoS (fq_codel)
 BUFFERBLOAT_QOS=1
@@ -186,18 +199,14 @@ TCP_LOW_LATENCY=1
 
 Verify that your tethered traffic is completely shielded and masqueraded:
 
-### 1. Check TTL on Connected Devices
-Connect your PC, Mac, or secondary phone to your Android hotspot and test:
-* **Windows (Command Prompt):**
-  ```cmd
-  ping 8.8.8.8
-  ```
-  *Result:* Look for `Reply from 8.8.8.8: bytes=32 time=... TTL=64` (Windows default is `128`; `64` confirms active normalization).
-* **macOS / Linux (Terminal):**
+### 1. Check Outgoing TTL
+The TTL is rewritten on packets *leaving* the phone, so a `ping` from a client can't show it (the TTL in a ping reply is set by the remote server). Check on the phone instead:
+* **Counters:** browse from a tethered device and run `su -c ttlshield status`; `ttl_modified` should keep rising.
+* **On the wire** (needs `tcpdump` on the phone):
   ```bash
-  ping -c 4 8.8.8.8
+  su -c 'tcpdump -ni any -v -c 20 "icmp or tcp port 443"'
   ```
-  *Result:* Look for `ttl=64` (Normally, a routed packet from macOS arrives at `63`; `64` proves the phone rewrites the outgoing hop).
+  *Result:* packets leaving on the mobile interface show `ttl 64` (`hlim 64` for IPv6), even for Windows clients (default `128`).
 
 ### 2. Verify Encrypted DNS (DoH)
 * Visit [BrowserLeaks DNS Leak Test](https://browserleaks.com/dns) on your tethered device.
@@ -225,7 +234,9 @@ Example output:
   "target_ttl": 64,
   "tcp_split_enabled": true,
   "doh_enabled": true,
-  "doh_provider": "cloudflare"
+  "doh_provider": "cloudflare",
+  "version": "v3.7",
+  "version_code": 370
 }
 ```
 
@@ -243,7 +254,7 @@ Yes. Carriers distinguish phone data from tethered hotspot data by inspecting th
 <details>
 <summary><b>Does this work with IPv6?</b></summary>
 <p>
-Yes. GKI-Tether-Shield simultaneously normalizes both IPv4 TTL and IPv6 Hop Limit to 64.
+Yes. IPv4 TTL and IPv6 Hop Limit are both normalized, including IPv4 traffic sent through 464XLAT/CLAT on IPv6-only carriers, and tethered clients' IPv6 DNS queries go through the DoH proxy too (when the kernel supports IPv6 NAT).
 </p>
 </details>
 
@@ -257,21 +268,21 @@ By design, the companion app omits launcher intent categories to keep your home 
 <details>
 <summary><b>Will this affect online gaming ping or BitTorrent downloads?</b></summary>
 <p>
-No. BitTorrent and gaming traffic stay in kernel space at full line-rate speed. Only standard web ports (80, 443, 8080, 8443) are subject to TCP segmentation, and non-64 TTL packets are selectively queued. The built-in <code>fq_codel</code> queue discipline actively stabilizes ping by eliminating bufferbloat.
+BitTorrent and gaming payloads are never modified: only web ports (80, 443, 8080, 8443) are subject to TCP segmentation. Like all tethered traffic, their packets do pass through the daemon so their TTL can be fixed (GKI has no in-kernel TTL target); this is spread over 4 CPU cores and fails open under overload. The built-in <code>fq_codel</code> queue discipline stabilizes ping by eliminating bufferbloat.
 </p>
 </details>
 
 <details>
 <summary><b>What happens if the selected DoH provider is unreachable?</b></summary>
 <p>
-The embedded DNS proxy features an automatic fallback mechanism: if an encrypted DoH query times out or fails, it immediately falls back to standard UDP resolution via <code>1.1.1.1:53</code>, preventing any internet loss.
+The embedded DNS proxy falls back to standard UDP resolution via <code>1.1.1.1:53</code> if an encrypted DoH query times out or fails, so name resolution keeps working. Those fallback queries are not encrypted.
 </p>
 </details>
 
 <details>
 <summary><b>What kernels and Android versions are supported?</b></summary>
 <p>
-All Generic Kernel Image (GKI) kernels (5.4, 5.10, 5.15, 6.1, 6.6, 6.12+) running Android 12, 13, 14, 15, and 16. Also fully backwards-compatible with legacy non-GKI kernels that support Netfilter Queues (<code>CONFIG_NETFILTER_NETLINK_QUEUE</code>).
+All Generic Kernel Image (GKI) kernels (5.4, 5.10, 5.15, 6.1, 6.6, 6.12+) running Android 12, 13, 14, 15, and 16. Non-GKI kernels work too if they provide Netfilter Queues (<code>CONFIG_NETFILTER_NETLINK_QUEUE</code>, the <code>NFQUEUE</code> target) and the <code>ttl</code>/<code>hl</code> matches (<code>CONFIG_NETFILTER_XT_MATCH_HL</code>).
 </p>
 </details>
 
@@ -291,12 +302,12 @@ sh scripts/build.sh   # arm64 binary ./tether_shield, version taken from module.
 
 ### Testing
 ```bash
-GOOS=linux go vet . && go test ./...   # tests run on Linux (or WSL)
+go vet . && go test -race ./...   # Linux (or WSL) only: the daemon uses Linux syscalls
 ```
 
 ### Packaging Module ZIP
 ```bash
-sh scripts/package.sh v3.5-dev dist   # writes dist/GKI_Tether_Shield_v3.5-dev.zip
+sh scripts/package.sh dev dist   # writes dist/GKI_Tether_Shield_dev.zip
 ```
 
 ### Releasing

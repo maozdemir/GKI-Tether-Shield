@@ -1,7 +1,6 @@
 #!/system/bin/sh
 MODDIR="/data/adb/modules/gki_hotspot_shield"
-[ ! -f "$MODDIR/nfqttl" ] && MODDIR="/data/adb/modules/nfqttl"
-[ ! -f "$MODDIR/nfqttl" ] && MODDIR="${0%/*}"
+[ -d "$MODDIR" ] || MODDIR="${0%/*}"
 
 # 1. Ensure daemon is running
 if ! ps -A | grep -q nfqttl; then

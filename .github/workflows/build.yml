@@ -1,59 +1,34 @@
 name: Build and Release Magisk Module
 
+# Pushes and pull requests only build and test. A GitHub release is created
+# exclusively by pushing a version tag (e.g. `git tag v3.6 && git push origin v3.6`)
+# that matches module.prop; an existing release is never modified.
 on:
   push:
     branches:
       - main
     tags:
       - 'v*'
+  pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.24'
 
-      - name: Extract Version & Generate Changelog
-        id: release_info
-        run: |
-          # 1. Read version from module.prop
-          VERSION=$(grep "^version=" module.prop | head -n1 | cut -d'=' -f2 | tr -d '\r')
-          if [ -z "$VERSION" ]; then
-            VERSION="v3.3"
-          fi
-          if [[ ! "$VERSION" =~ ^v ]]; then
-            TAG="v$VERSION"
-          else
-            TAG="$VERSION"
-          fi
-          echo "TAG=$TAG" >> $GITHUB_OUTPUT
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-
-          # 2. Get latest previous tag
-          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -n "$PREV_TAG" ]; then
-            echo "Generating changelog since $PREV_TAG..."
-            CHANGELOG=$(git log "$PREV_TAG..HEAD" --pretty=format:"* %s (%h)" --no-merges)
-          else
-            echo "Generating full changelog..."
-            CHANGELOG=$(git log --pretty=format:"* %s (%h)" --no-merges)
-          fi
-
-          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHANGELOG" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+      - name: Check version consistency
+        run: sh scripts/check-version.sh
 
       - name: Vet and test
         run: |
@@ -61,57 +36,71 @@ jobs:
           go test -race .
 
       - name: Build arm64 binary
+        run: GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o nfqttl .
+
+      - name: Package module ZIP
         run: |
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o nfqttl .
+          VERSION=$(grep '^version=' module.prop | cut -d= -f2 | tr -d '\r')
+          sh scripts/package.sh "$VERSION-dev+${GITHUB_SHA::7}" dist
 
-      - name: Sync update.json and changelog.md
+      - name: Upload build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: module-${{ github.sha }}
+          path: dist/GKI_Tether_Shield_*.zip
+          retention-days: 14
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.24'
+
+      - name: Verify tag
         run: |
-          VERSION=$(grep "^version=" module.prop | head -n1 | cut -d'=' -f2 | tr -d '\r')
-          VERSION_CODE=$(grep "^versionCode=" module.prop | head -n1 | cut -d'=' -f2 | tr -d '\r')
-          TAG="${{ steps.release_info.outputs.TAG }}"
-
-          cat <<EOF > update.json
-          {
-            "version": "$VERSION",
-            "versionCode": $VERSION_CODE,
-            "zipUrl": "https://github.com/maozdemir/GKI-Tether-Shield/releases/download/$TAG/GKI_Tether_Shield_$TAG.zip",
-            "changelog": "https://raw.githubusercontent.com/maozdemir/GKI-Tether-Shield/main/changelog.md"
-          }
-          EOF
-
-          git config user.name "Mustafa Alper ÖZDEMİR"
-          git config user.email "ozdemirmus16@itu.edu.tr"
-          if git status --porcelain | grep -qE "update.json|changelog.md"; then
-            git add update.json changelog.md || true
-            git commit -m "Auto-sync update.json and changelog for $TAG [skip ci]" || true
-            git push origin HEAD:main || echo "Push skipped or already up to date"
+          sh scripts/check-version.sh "$TAG"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main ||
+            { echo "::error::$TAG does not point at a commit on main"; exit 1; }
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists; bump the version instead of rebuilding it"
+            exit 1
           fi
 
-      - name: Package Magisk Module ZIP
+      - name: Build and package
         run: |
-          mkdir -p system/bin webroot
-          cp scripts/ttlshield system/bin/ttlshield
-          cp index.html webroot/index.html
-          chmod +x nfqttl service.sh customize.sh action.sh uninstall.sh system/bin/ttlshield 2>/dev/null || true
-          ZIP_NAME="GKI_Hotspot_Shield_${{ steps.release_info.outputs.TAG }}.zip"
-          ZIP_NAME_NEW="GKI_Tether_Shield_${{ steps.release_info.outputs.TAG }}.zip"
-          zip -r9 "$ZIP_NAME" module.prop config.conf service.sh customize.sh action.sh uninstall.sh HotspotShieldManager.apk nfqttl system webroot META-INF update.json changelog.md
-          cp "$ZIP_NAME" "$ZIP_NAME_NEW"
-          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-          echo "ZIP_NAME_NEW=$ZIP_NAME_NEW" >> $GITHUB_ENV
+          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o nfqttl .
+          sh scripts/package.sh "$TAG" dist
+          (cd dist && sha256sum *.zip > SHA256SUMS)
 
-      - name: Create or Update GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.release_info.outputs.TAG }}
-          name: "${{ steps.release_info.outputs.TAG }}"
-          body: |
-            ## What's Changed in ${{ steps.release_info.outputs.TAG }}
-            
-            ${{ steps.release_info.outputs.CHANGELOG }}
-          files: |
-            ${{ env.ZIP_NAME }}
-            ${{ env.ZIP_NAME_NEW }}
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate release notes
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
+          {
+            echo "## What's Changed in $TAG"
+            echo
+            if [ -n "$PREV_TAG" ]; then
+              git log "$PREV_TAG..$TAG" --pretty=format:"* %s (%h)" --no-merges
+            else
+              git log "$TAG" --pretty=format:"* %s (%h)" --no-merges
+            fi
+            echo
+          } > release-notes.md
+
+      - name: Create GitHub release
+        run: |
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file release-notes.md \
+            dist/GKI_Tether_Shield_"$TAG".zip dist/GKI_Hotspot_Shield_"$TAG".zip dist/SHA256SUMS

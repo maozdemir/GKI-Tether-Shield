@@ -72,64 +72,108 @@ start_daemon() {
 killall -9 tether_shield 2>/dev/null
 start_daemon
 
-# 5. High-Efficiency NFQUEUE Mangle Rules (chain tshield_out)
+# 5. High-Efficiency NFQUEUE Mangle Rules
+# Cellular interface names differ per SoC (Qualcomm rmnet*, MediaTek ccmni*,
+# Unisoc seth_lte*/sipa_eth*, 464XLAT v4-*/clat*, ...), so rules are not
+# tied to a list of WAN names. Instead every egress interface is treated as
+# upstream EXCEPT the known downstream/local ones below: a modem with an
+# unexpected name is still covered (fail-safe for TTL fixing), while an
+# unexpected downstream name only costs some performance.
+DOWNSTREAM_IFACES="lo wlan+ swlan+ ap+ softap+ p2p+ wigig+ rndis+ ncm+ usb+ bt-pan+ eth+"
+WAN_CHAIN=tshield_wan   # POSTROUTING -> skip downstream -> tshield_out
+CHAIN=tshield_out       # the actual queueing rules
+
+# tshield_out:
 # 1) Intercept ports 80, 443 for GoodbyeDPI / TLS SNI splitting
 # 2) Intercept non-64 TTL packets for real-time TTL normalization
 # 3) Completely bypass BitTorrent, gaming UDP, and bulk file downloads
 # Packets are spread over 4 queues (6464-6467, one daemon worker per queue,
 # NUM_QUEUES in nfqueue.go) by flow hash, so per-flow ordering is preserved.
 # Falls back to a single queue if --queue-balance is unsupported.
-CHAIN=tshield_out
-QUEUE_TARGET="--queue-balance 6464:6467 --queue-bypass"
-iptables -t mangle -N $CHAIN 2>/dev/null
-iptables -t mangle -F $CHAIN
-if ! iptables -t mangle -A $CHAIN -m ttl ! --ttl-eq 64 -j NFQUEUE $QUEUE_TARGET 2>/dev/null; then
-    QUEUE_TARGET="--queue-num 6464 --queue-bypass"
-    iptables -t mangle -A $CHAIN -m ttl ! --ttl-eq 64 -j NFQUEUE $QUEUE_TARGET
-fi
-# The TLS ClientHello / HTTP request is within the first few packets of a
-# connection, so only those need DPI splitting. Matching just packets 1-6
-# keeps bulk HTTPS (streaming, downloads) out of userspace. Packets with a
-# non-64 TTL are still queued by the rule below for TTL normalization.
-# Falls back to queueing all web packets if xt_connbytes is unavailable.
-sysctl -w net.netfilter.nf_conntrack_acct=1 2>/dev/null
-iptables -t mangle -I $CHAIN 1 -p tcp -m multiport --dports 80,443 \
-    -m connbytes --connbytes-dir original --connbytes-mode packets --connbytes 1:6 \
-    -j NFQUEUE $QUEUE_TARGET 2>/dev/null ||
-    iptables -t mangle -I $CHAIN 1 -p tcp -m multiport --dports 80,443 -j NFQUEUE $QUEUE_TARGET
+setup_queue_rules() {
+    QUEUE_TARGET="--queue-balance 6464:6467 --queue-bypass"
+    iptables -t mangle -N $CHAIN 2>/dev/null
+    iptables -t mangle -F $CHAIN
+    if ! iptables -t mangle -A $CHAIN -m ttl ! --ttl-eq 64 -j NFQUEUE $QUEUE_TARGET 2>/dev/null; then
+        QUEUE_TARGET="--queue-num 6464 --queue-bypass"
+        iptables -t mangle -A $CHAIN -m ttl ! --ttl-eq 64 -j NFQUEUE $QUEUE_TARGET
+    fi
+    # The TLS ClientHello / HTTP request is within the first few packets of a
+    # connection, so only those need DPI splitting. Matching just packets 1-6
+    # keeps bulk HTTPS (streaming, downloads) out of userspace. Packets with a
+    # non-64 TTL are still queued by the rule above for TTL normalization.
+    # Falls back to queueing all web packets if xt_connbytes is unavailable.
+    sysctl -w net.netfilter.nf_conntrack_acct=1 2>/dev/null
+    iptables -t mangle -I $CHAIN 1 -p tcp -m multiport --dports 80,443 \
+        -m connbytes --connbytes-dir original --connbytes-mode packets --connbytes 1:6 \
+        -j NFQUEUE $QUEUE_TARGET 2>/dev/null ||
+        iptables -t mangle -I $CHAIN 1 -p tcp -m multiport --dports 80,443 -j NFQUEUE $QUEUE_TARGET
 
-# Apply in POSTROUTING on outgoing WAN (cellular) interfaces.
-# rmnet+ also matches rmnet_data*, so one rule covers both.
-iptables -t mangle -C POSTROUTING -o rmnet+ -j $CHAIN 2>/dev/null || iptables -t mangle -A POSTROUTING -o rmnet+ -j $CHAIN
+    # IPv6: forwarded packets leave with Hop Limit 63 (or 127/254), which is
+    # how carriers detect tethering on IPv6-only / 464XLAT networks. Queue
+    # non-64 hop limits to the same queues; the daemon rewrites IPv6 too.
+    # Falls back to queueing all upstream IPv6 if the hl match is unavailable.
+    ip6tables -t mangle -N $CHAIN 2>/dev/null
+    ip6tables -t mangle -F $CHAIN
+    ip6tables -t mangle -A $CHAIN -m hl ! --hl-eq 64 -j NFQUEUE $QUEUE_TARGET 2>/dev/null ||
+        ip6tables -t mangle -A $CHAIN -j NFQUEUE $QUEUE_TARGET
 
-# IPv6: forwarded packets leave with Hop Limit 63 (or 127/254), which is how
-# carriers detect tethering on IPv6-only / 464XLAT networks. Queue non-64
-# hop limits to the same queues; the daemon rewrites IPv6 Hop Limit too.
-# Falls back to queueing all WAN IPv6 if the hl match is unavailable.
-ip6tables -t mangle -N $CHAIN 2>/dev/null
-ip6tables -t mangle -F $CHAIN
-ip6tables -t mangle -A $CHAIN -m hl ! --hl-eq 64 -j NFQUEUE $QUEUE_TARGET 2>/dev/null ||
-    ip6tables -t mangle -A $CHAIN -j NFQUEUE $QUEUE_TARGET
-ip6tables -t mangle -C POSTROUTING -o rmnet+ -j $CHAIN 2>/dev/null || ip6tables -t mangle -A POSTROUTING -o rmnet+ -j $CHAIN
+    for ipt in iptables ip6tables; do
+        $ipt -t mangle -N $WAN_CHAIN 2>/dev/null
+        $ipt -t mangle -F $WAN_CHAIN
+        for iface in $DOWNSTREAM_IFACES; do
+            $ipt -t mangle -A $WAN_CHAIN -o "$iface" -j RETURN
+        done
+        $ipt -t mangle -A $WAN_CHAIN -j $CHAIN
+        $ipt -t mangle -C POSTROUTING -j $WAN_CHAIN 2>/dev/null ||
+            $ipt -t mangle -A POSTROUTING -j $WAN_CHAIN
+    done
+}
+
+# Upgrade cleanup: v3.6 jumped to tshield_out from POSTROUTING for rmnet+
+# only; tshield_wan now covers every upstream interface.
+for ipt in iptables ip6tables; do
+    $ipt -t mangle -D POSTROUTING -o rmnet+ -j $CHAIN 2>/dev/null
+done
+setup_queue_rules
 
 # 6. TCP MSS Clamping to PMTU
 iptables -t mangle -C FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 # 7. Transparent DNS-over-HTTPS (DoH) Redirection (Port 53 -> 53545)
-# Only tethered/local clients may use the proxy: DNS arriving on the
-# cellular WAN is never redirected, and direct access to port 53545 from
-# the WAN is dropped, so the phone is not an open resolver / DNS
-# amplifier when the carrier assigns a reachable IP.
+# Allowlist: only DNS from downstream (tethered) interfaces is redirected,
+# and the proxy port only accepts loopback and downstream traffic. A modem
+# interface of any name therefore can never reach the resolver, so the phone
+# is not an open resolver / DNS amplifier on a reachable carrier IP.
+DNS_NAT_CHAIN=tshield_dns
+DNS_IN_CHAIN=tshield_dns_in
 for proto in udp tcp; do
     # Upgrade cleanup: v3.1-v3.3 redirected to 5353; v3.4-v3.5 redirected
-    # without an interface restriction.
+    # without an interface restriction; v3.6 excluded rmnet+ only.
     iptables -t nat -D PREROUTING -p $proto --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null
     iptables -t nat -D PREROUTING -p $proto --dport 53 -j REDIRECT --to-ports 53545 2>/dev/null
+    iptables -t nat -D PREROUTING ! -i rmnet+ -p $proto --dport 53 -j REDIRECT --to-ports 53545 2>/dev/null
+    iptables -D INPUT -i rmnet+ -p $proto --dport 53545 -j DROP 2>/dev/null
+done
 
-    iptables -t nat -C PREROUTING ! -i rmnet+ -p $proto --dport 53 -j REDIRECT --to-ports 53545 2>/dev/null ||
-        iptables -t nat -A PREROUTING ! -i rmnet+ -p $proto --dport 53 -j REDIRECT --to-ports 53545
-    iptables -C INPUT -i rmnet+ -p $proto --dport 53545 -j DROP 2>/dev/null ||
-        iptables -I INPUT -i rmnet+ -p $proto --dport 53545 -j DROP
+iptables -t nat -N $DNS_NAT_CHAIN 2>/dev/null
+iptables -t nat -F $DNS_NAT_CHAIN
+iptables -N $DNS_IN_CHAIN 2>/dev/null
+iptables -F $DNS_IN_CHAIN
+for iface in $DOWNSTREAM_IFACES; do
+    [ "$iface" = lo ] && continue
+    for proto in udp tcp; do
+        iptables -t nat -A $DNS_NAT_CHAIN -i "$iface" -p $proto --dport 53 -j REDIRECT --to-ports 53545
+    done
+done
+for iface in $DOWNSTREAM_IFACES; do
+    iptables -A $DNS_IN_CHAIN -i "$iface" -j RETURN
+done
+iptables -A $DNS_IN_CHAIN -j DROP
+iptables -t nat -C PREROUTING -j $DNS_NAT_CHAIN 2>/dev/null || iptables -t nat -A PREROUTING -j $DNS_NAT_CHAIN
+for proto in udp tcp; do
+    iptables -C INPUT -p $proto --dport 53545 -j $DNS_IN_CHAIN 2>/dev/null ||
+        iptables -I INPUT -p $proto --dport 53545 -j $DNS_IN_CHAIN
 done
 
 # 8. Daemon Watchdog, Hotspot-Aware QoS, Power Saver Guard & Low-Latency Tuning
@@ -152,7 +196,7 @@ apply_sysctls() {
     done
 }
 
-# Sets TETHER_IFACES (all tether/WAN links) and WIFI_IFACES (Wi-Fi only).
+# Sets TETHER_IFACES (downstream links present) and WIFI_IFACES (Wi-Fi only).
 scan_ifaces() {
     TETHER_IFACES=""
     WIFI_IFACES=""
@@ -160,9 +204,22 @@ scan_ifaces() {
         name="${path##*/}"
         case "$name" in
             wlan*|swlan*|ap*|softap*) TETHER_IFACES="$TETHER_IFACES $name"; WIFI_IFACES="$WIFI_IFACES $name" ;;
-            rndis*|ncm*|usb*|bt-pan|rmnet*) TETHER_IFACES="$TETHER_IFACES $name" ;;
+            p2p*|wigig*|rndis*|ncm*|usb*|bt-pan*|eth*) TETHER_IFACES="$TETHER_IFACES $name" ;;
         esac
     done
+}
+
+# find_upstreams NAT_RULES: sets UPSTREAM_IFACES to the "-o <iface>" of
+# Android's tethering MASQUERADE rules, i.e. the real uplink on any SoC.
+find_upstreams() {
+    UPSTREAM_IFACES=""
+    want=0
+    set -f
+    for word in $1; do
+        [ "$want" = 1 ] && UPSTREAM_IFACES="$UPSTREAM_IFACES $word"
+        if [ "$word" = "-o" ]; then want=1; else want=0; fi
+    done
+    set +f
 }
 
 (
@@ -182,14 +239,16 @@ scan_ifaces() {
             low_latency="$want_ll"
         fi
 
-        case "$(iptables -t nat -S tetherctrl_nat_POSTROUTING 2>/dev/null)" in
+        nat_rules="$(iptables -t nat -S tetherctrl_nat_POSTROUTING 2>/dev/null)"
+        case "$nat_rules" in
             *MASQUERADE*) active=1 ;;
             *) active=0 ;;
         esac
+        find_upstreams "$nat_rules"
         if conf_enabled BUFFERBLOAT_QOS 1; then qos=1; else qos=0; fi
         if conf_enabled WIFI_POWER_SAVE_LOCK 1; then psl=1; else psl=0; fi
         scan_ifaces
-        state="$active|$qos|$psl|$TETHER_IFACES"
+        state="$active|$qos|$psl|$TETHER_IFACES|$UPSTREAM_IFACES"
 
         if [ "$state" != "$applied" ]; then
             for i in $qos_ifaces; do tc qdisc del dev "$i" root 2>/dev/null; done
@@ -198,7 +257,7 @@ scan_ifaces() {
             psl_ifaces=""
             if [ "$active" = 1 ]; then
                 if [ "$qos" = 1 ]; then
-                    for i in $TETHER_IFACES; do
+                    for i in $TETHER_IFACES $UPSTREAM_IFACES; do
                         tc qdisc replace dev "$i" root fq_codel 2>/dev/null && qos_ifaces="$qos_ifaces $i"
                     done
                 fi

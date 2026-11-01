@@ -106,21 +106,21 @@ func TestSplitModeParsingAndUpdates(t *testing.T) {
 }
 
 func TestBlockQUICSetting(t *testing.T) {
-	if !defaultConfig.BlockQUIC {
-		t.Fatal("BLOCK_QUIC defaults to on")
+	if defaultConfig.BlockQUIC {
+		t.Fatal("BLOCK_QUIC defaults to off")
 	}
-	if got := parseConfig(defaultConfig, strings.NewReader("BLOCK_QUIC=0\n")); got.BlockQUIC {
-		t.Fatal("BLOCK_QUIC=0 must disable it")
+	if got := parseConfig(defaultConfig, strings.NewReader("BLOCK_QUIC=1\n")); !got.BlockQUIC {
+		t.Fatal("BLOCK_QUIC=1 must enable it")
 	}
-	next, err := applyConfigUpdate(defaultConfig, map[string]any{"BLOCK_QUIC": "0"})
-	if err != nil || next.BlockQUIC {
+	next, err := applyConfigUpdate(defaultConfig, map[string]any{"BLOCK_QUIC": "1"})
+	if err != nil || !next.BlockQUIC {
 		t.Fatalf("API update: %+v, %v", next, err)
 	}
 	path := filepath.Join(t.TempDir(), "config.conf")
 	if err := saveConfigToFile(path, next); err != nil {
 		t.Fatal(err)
 	}
-	if got := loadConfigFile(path, defaultConfig); got.BlockQUIC {
+	if got := loadConfigFile(path, defaultConfig); !got.BlockQUIC {
 		t.Fatal("BLOCK_QUIC must round-trip through config.conf")
 	}
 }

@@ -233,7 +233,7 @@ setup_queue_rules
 # is unavailable, which makes them wait for a timeout instead).
 QUIC_CHAIN=tshield_quic
 want_quic_block() {
-    conf_enabled BLOCK_QUIC 1 && conf_enabled TCP_SPLIT 1
+    conf_enabled BLOCK_QUIC 0 && conf_enabled TCP_SPLIT 1
 }
 set_quic_block() {
     for ipt in iptables ip6tables; do

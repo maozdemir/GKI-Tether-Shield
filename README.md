@@ -76,7 +76,7 @@ Lastly, legacy userspace daemons ran a single-threaded queue and modified payloa
 ### 2. 🛡️ GoodbyeDPI / Zapret TLS ClientHello TCP Segmentation
 - Inspects initial HTTPS TLS ClientHello (SNI) and HTTP cleartext requests.
 - Splits the first data segment **inside the server name** (TLS SNI / HTTP Host) using raw socket injection, so no single packet carries the full name; falls back to a fixed byte position (`SPLIT_MODE=fixed`). Works over IPv4 and IPv6.
-- Optionally rejects HTTP/3 (QUIC, UDP 443) so browsers fall back to TCP, where splitting applies (`BLOCK_QUIC`).
+- Optionally rejects HTTP/3 (QUIC, UDP 443) so browsers fall back to TCP, where splitting applies (`BLOCK_QUIC`, off by default).
 - Evades SNI-based DPI middleboxes and domain filtering for all tethered clients (Windows, macOS, iOS, Android, Linux, consoles).
 - **Isolated to Web Ports (80, 443, 8080, 8443):** non-web protocols (BitTorrent, gaming UDP, custom ports) are never split, preventing protocol corruption.
 - Only the first 6 packets of each web connection are inspected (`connbytes`), so streaming and downloads skip DPI processing.
@@ -167,7 +167,7 @@ SPLIT_POS=2
 # Split inside the TLS SNI / HTTP Host name (auto) or always at SPLIT_POS (fixed)
 SPLIT_MODE=auto
 # Reject HTTP/3 (QUIC, UDP 443) so browsers fall back to TCP, where splitting applies
-BLOCK_QUIC=1
+BLOCK_QUIC=0
 # First of 4 consecutive NFQUEUE numbers (6464-6467); change only on conflicts
 QUEUE_NUM=6464
 

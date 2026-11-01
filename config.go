@@ -53,7 +53,7 @@ var defaultConfig = Config{
 	TcpSplit:          true,
 	SplitPos:          2,
 	SplitMode:         splitModeAuto,
-	BlockQUIC:         true,
+	BlockQUIC:         false,
 	BufferbloatQoS:    true,
 	WifiPowerSaveLock: true,
 	TcpLowLatency:     true,

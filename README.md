@@ -280,7 +280,7 @@ All Generic Kernel Image (GKI) kernels (5.4, 5.10, 5.15, 6.1, 6.6, 6.12+) runnin
 ## 🛠️ Building from Source
 
 ### Requirements
-- Go 1.24+
+- Go 1.26+ (`go.mod` pins the toolchain; `GOTOOLCHAIN=auto` fetches it)
 - `zip` and a POSIX shell (Linux / macOS / WSL / Git Bash)
 - Android SDK (build-tools 34+) for companion APK compilation (optional)
 

@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -112,27 +113,6 @@ func currentDoHProvider() dohProvider {
 	return dohProviders[defaultDoHProvider]
 }
 
-// resolveFallbackUDP forwards to 1.1.1.1:53 if DoH fails or times out
-func resolveFallbackUDP(query []byte) ([]byte, error) {
-	conn, err := net.DialTimeout("udp", "1.1.1.1:53", 2*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	if _, err := conn.Write(query); err != nil {
-		return nil, err
-	}
-
-	buf := make([]byte, 4096)
-	n, err := conn.Read(buf)
-	if err != nil {
-		return nil, err
-	}
-	return buf[:n], nil
-}
-
 func lookupDNSCache(queryKey string, query []byte) ([]byte, bool) {
 	dnsCacheMu.RLock()
 	entry, ok := dnsCache[queryKey]
@@ -182,6 +162,42 @@ func queryDoH(query []byte) ([]byte, error) {
 	return body, nil
 }
 
+// plainDNSUpstream is used when DoH is disabled or fails. A var so tests
+// can point it at a local server.
+var plainDNSUpstream = "1.1.1.1:53"
+
+const plainDNSTimeout = 2 * time.Second
+
+// resolvePlainUDP sends query to plainDNSUpstream and returns the first
+// reply whose transaction ID matches and has the QR (response) bit set, so
+// stray or spoofed datagrams are ignored.
+func resolvePlainUDP(query []byte) ([]byte, error) {
+	if len(query) < 12 {
+		return nil, fmt.Errorf("query too short")
+	}
+	conn, err := net.DialTimeout("udp", plainDNSUpstream, plainDNSTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("dial %s: %w", plainDNSUpstream, err)
+	}
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(plainDNSTimeout))
+	if _, err := conn.Write(query); err != nil {
+		return nil, fmt.Errorf("send to %s: %w", plainDNSUpstream, err)
+	}
+
+	buf := make([]byte, 4096)
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			return nil, fmt.Errorf("read from %s: %w", plainDNSUpstream, err)
+		}
+		if n >= 12 && buf[0] == query[0] && buf[1] == query[1] && buf[2]&0x80 != 0 {
+			return append([]byte(nil), buf[:n]...), nil
+		}
+	}
+}
+
 func resolveDoH(query []byte) ([]byte, error) {
 	if len(query) < 12 {
 		return nil, fmt.Errorf("query too short")
@@ -195,78 +211,124 @@ func resolveDoH(query []byte) ([]byte, error) {
 
 	resp, err := queryDoH(query)
 	if err != nil {
-		// Fallback to direct UDP DNS if DoH failed
-		return resolveFallbackUDP(query)
+		// Fallback to plain DNS if DoH failed
+		return resolvePlainUDP(query)
 	}
 	atomic.AddUint64(&dohQueries, 1)
 	storeDNSCache(queryKey, resp)
 	return resp, nil
 }
 
+// resolveDNS answers a redirected client query. iptables keeps redirecting
+// port 53 here even when DoH is switched off, so queries must still be
+// answered (in plain DNS) rather than dropped.
+func resolveDNS(query []byte) ([]byte, error) {
+	if cfg.DohEnabled {
+		return resolveDoH(query)
+	}
+	return resolvePlainUDP(query)
+}
+
+const (
+	maxConcurrentDNSQueries = 256
+	maxConcurrentDNSConns   = 64
+)
+
+var (
+	dnsQuerySlots = make(chan struct{}, maxConcurrentDNSQueries)
+	dnsConnSlots  = make(chan struct{}, maxConcurrentDNSConns)
+	dnsTCPTimeout = 5 * time.Second
+)
+
+// tryAcquire takes a slot without blocking; release with <-sem.
+func tryAcquire(sem chan struct{}) bool {
+	select {
+	case sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func serveDNSUDP(conn net.PacketConn) {
+	buf := make([]byte, 4096)
+	for {
+		n, clientAddr, err := conn.ReadFrom(buf)
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			continue
+		}
+		// Under a flood, drop queries instead of piling up goroutines;
+		// clients retry.
+		if n < 12 || !tryAcquire(dnsQuerySlots) {
+			continue
+		}
+		q := append([]byte(nil), buf[:n]...)
+		go func(target net.Addr) {
+			defer func() { <-dnsQuerySlots }()
+			if resp, err := resolveDNS(q); err == nil && len(resp) > 0 {
+				_, _ = conn.WriteTo(resp, target)
+			}
+		}(clientAddr)
+	}
+}
+
+// serveDNSTCPConn answers one length-prefixed query, bounded by a deadline
+// so idle or slow clients cannot hold the connection open.
+func serveDNSTCPConn(c net.Conn) {
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(dnsTCPTimeout))
+
+	var lenBuf [2]byte
+	if _, err := io.ReadFull(c, lenBuf[:]); err != nil {
+		return
+	}
+	q := make([]byte, binary.BigEndian.Uint16(lenBuf[:]))
+	if _, err := io.ReadFull(c, q); err != nil {
+		return
+	}
+	resp, err := resolveDNS(q)
+	if err != nil || len(resp) == 0 || len(resp) > 0xffff {
+		return
+	}
+	out := binary.BigEndian.AppendUint16(nil, uint16(len(resp)))
+	_, _ = c.Write(append(out, resp...))
+}
+
+func serveDNSTCP(l net.Listener) {
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			continue
+		}
+		if !tryAcquire(dnsConnSlots) {
+			_ = c.Close()
+			continue
+		}
+		go func() {
+			defer func() { <-dnsConnSlots }()
+			serveDNSTCPConn(c)
+		}()
+	}
+}
+
+// startDNSServer listens on all IPv4 interfaces so REDIRECTed tether
+// clients can reach it; service.sh drops port DNS_PORT on WAN interfaces.
 func startDNSServer() {
-	// UDP DNS Listener on 0.0.0.0:53545
-	go func() {
-		conn, err := net.ListenPacket("udp4", fmt.Sprintf("0.0.0.0:%d", DNS_PORT))
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-
-		buf := make([]byte, 4096)
-		for {
-			n, clientAddr, err := conn.ReadFrom(buf)
-			if err != nil {
-				continue
-			}
-			if !cfg.DohEnabled || n < 12 {
-				continue
-			}
-
-			qCopy := make([]byte, n)
-			copy(qCopy, buf[:n])
-
-			go func(q []byte, target net.Addr) {
-				resp, err := resolveDoH(q)
-				if err == nil && len(resp) > 0 {
-					_, _ = conn.WriteTo(resp, target)
-				}
-			}(qCopy, clientAddr)
-		}
-	}()
-
-	// TCP DNS Listener on 0.0.0.0:53545
-	go func() {
-		l, err := net.Listen("tcp4", fmt.Sprintf("0.0.0.0:%d", DNS_PORT))
-		if err != nil {
-			return
-		}
-		defer l.Close()
-
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				continue
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				var lenBuf [2]byte
-				if _, err := io.ReadFull(c, lenBuf[:]); err != nil {
-					return
-				}
-				qLen := binary.BigEndian.Uint16(lenBuf[:])
-				q := make([]byte, qLen)
-				if _, err := io.ReadFull(c, q); err != nil {
-					return
-				}
-
-				resp, err := resolveDoH(q)
-				if err == nil && len(resp) > 0 {
-					var respLenBuf [2]byte
-					binary.BigEndian.PutUint16(respLenBuf[:], uint16(len(resp)))
-					_, _ = c.Write(respLenBuf[:])
-					_, _ = c.Write(resp)
-				}
-			}(conn)
-		}
-	}()
+	addr := fmt.Sprintf("0.0.0.0:%d", DNS_PORT)
+	if conn, err := net.ListenPacket("udp4", addr); err != nil {
+		fmt.Fprintf(os.Stderr, "DNS UDP listen on %s: %v\n", addr, err)
+	} else {
+		go serveDNSUDP(conn)
+	}
+	if l, err := net.Listen("tcp4", addr); err != nil {
+		fmt.Fprintf(os.Stderr, "DNS TCP listen on %s: %v\n", addr, err)
+	} else {
+		go serveDNSTCP(l)
+	}
 }

@@ -317,18 +317,30 @@ func serveDNSTCP(l net.Listener) {
 	}
 }
 
-// startDNSServer listens on all IPv4 interfaces so REDIRECTed tether
-// clients can reach it; service.sh drops port DNS_PORT on WAN interfaces.
+// listenDNS opens dual-stack (IPv4 + IPv6) UDP and TCP listeners on port,
+// so tether clients querying over either family reach the proxy. service.sh
+// only accepts this port from loopback and downstream interfaces (iptables
+// and ip6tables), so no modem interface can reach it.
+func listenDNS(port int) (net.PacketConn, net.Listener, error) {
+	addr := fmt.Sprintf(":%d", port)
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("DNS UDP listen on %s: %w", addr, err)
+	}
+	l, err := net.Listen("tcp", fmt.Sprintf(":%d", pc.LocalAddr().(*net.UDPAddr).Port))
+	if err != nil {
+		pc.Close()
+		return nil, nil, fmt.Errorf("DNS TCP listen on %s: %w", addr, err)
+	}
+	return pc, l, nil
+}
+
 func startDNSServer() {
-	addr := fmt.Sprintf("0.0.0.0:%d", DNS_PORT)
-	if conn, err := net.ListenPacket("udp4", addr); err != nil {
-		fmt.Fprintf(os.Stderr, "DNS UDP listen on %s: %v\n", addr, err)
-	} else {
-		go serveDNSUDP(conn)
+	pc, l, err := listenDNS(DNS_PORT)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return
 	}
-	if l, err := net.Listen("tcp4", addr); err != nil {
-		fmt.Fprintf(os.Stderr, "DNS TCP listen on %s: %v\n", addr, err)
-	} else {
-		go serveDNSTCP(l)
-	}
+	go serveDNSUDP(pc)
+	go serveDNSTCP(l)
 }

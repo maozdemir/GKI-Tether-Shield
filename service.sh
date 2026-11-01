@@ -38,6 +38,15 @@ read_net_settings() {
     QUEUE_END=$((QUEUE + 3))
 }
 
+# Cellular interface names differ per SoC (Qualcomm rmnet*, MediaTek ccmni*,
+# Unisoc seth_lte*/sipa_eth*, 464XLAT v4-*/clat*, ...), so nothing is tied to
+# a list of WAN names. TTL rules treat every egress interface as upstream
+# EXCEPT these known downstream/local ones (an unexpected modem name is still
+# covered; an unexpected downstream name only costs performance), and the DNS
+# proxy only accepts traffic FROM them (an unexpected modem name can never
+# reach it).
+DOWNSTREAM_IFACES="lo wlan+ swlan+ ap+ softap+ p2p+ wigig+ rndis+ ncm+ usb+ bt-pan+ eth+"
+
 apply_default_ttl() {
     echo "$TTL" > /proc/sys/net/ipv4/ip_default_ttl
     echo "$TTL" > /proc/sys/net/ipv6/conf/all/hop_limit
@@ -94,21 +103,63 @@ for chain in nfqttli nfqttlo; do
     iptables -t mangle -X $chain 2>/dev/null
 done
 
+# DNS-over-HTTPS redirection (port 53 -> 53545) and proxy protection, for
+# IPv4 and IPv6. Allowlist: only DNS from downstream (tethered) interfaces is
+# redirected, and the proxy port only accepts loopback and downstream
+# traffic, so no modem interface (of any name) can reach the resolver and
+# the phone is never an open resolver / DNS amplifier on a carrier IP.
+# Runs before the daemon starts, so the dual-stack listener is never exposed.
+DNS_NAT_CHAIN=tshield_dns
+DNS_IN_CHAIN=tshield_dns_in
+setup_dns_rules() {
+    for proto in udp tcp; do
+        # Upgrade cleanup: v3.1-v3.3 redirected to 5353; v3.4-v3.5 redirected
+        # without an interface restriction; v3.6 excluded rmnet+ only.
+        iptables -t nat -D PREROUTING -p $proto --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null
+        iptables -t nat -D PREROUTING -p $proto --dport 53 -j REDIRECT --to-ports 53545 2>/dev/null
+        iptables -t nat -D PREROUTING ! -i rmnet+ -p $proto --dport 53 -j REDIRECT --to-ports 53545 2>/dev/null
+        iptables -D INPUT -i rmnet+ -p $proto --dport 53545 -j DROP 2>/dev/null
+    done
+
+    for ipt in iptables ip6tables; do
+        # Protection first and unconditionally: the listener is dual-stack.
+        $ipt -N $DNS_IN_CHAIN 2>/dev/null
+        $ipt -F $DNS_IN_CHAIN
+        for iface in $DOWNSTREAM_IFACES; do
+            $ipt -A $DNS_IN_CHAIN -i "$iface" -j RETURN
+        done
+        $ipt -A $DNS_IN_CHAIN -j DROP
+        for proto in udp tcp; do
+            $ipt -C INPUT -p $proto --dport 53545 -j $DNS_IN_CHAIN 2>/dev/null ||
+                $ipt -I INPUT -p $proto --dport 53545 -j $DNS_IN_CHAIN
+        done
+
+        # Redirect. IPv6 NAT may be missing on some kernels; then IPv6 DNS
+        # simply isn't redirected (still protected by the rules above).
+        $ipt -t nat -N $DNS_NAT_CHAIN 2>/dev/null || $ipt -t nat -L $DNS_NAT_CHAIN -n >/dev/null 2>&1 || continue
+        $ipt -t nat -F $DNS_NAT_CHAIN
+        for iface in $DOWNSTREAM_IFACES; do
+            [ "$iface" = lo ] && continue
+            for proto in udp tcp; do
+                $ipt -t nat -A $DNS_NAT_CHAIN -i "$iface" -p $proto --dport 53 -j REDIRECT --to-ports 53545
+            done
+        done
+        $ipt -t nat -C PREROUTING -j $DNS_NAT_CHAIN 2>/dev/null ||
+            $ipt -t nat -A PREROUTING -j $DNS_NAT_CHAIN
+    done
+}
+
 start_daemon() {
     nohup "$MODDIR/tether_shield" </dev/null >/dev/null 2>&1 &
 }
 
 killall -9 tether_shield 2>/dev/null
+setup_dns_rules
 start_daemon
 
 # 5. High-Efficiency NFQUEUE Mangle Rules
-# Cellular interface names differ per SoC (Qualcomm rmnet*, MediaTek ccmni*,
-# Unisoc seth_lte*/sipa_eth*, 464XLAT v4-*/clat*, ...), so rules are not
-# tied to a list of WAN names. Instead every egress interface is treated as
-# upstream EXCEPT the known downstream/local ones below: a modem with an
-# unexpected name is still covered (fail-safe for TTL fixing), while an
-# unexpected downstream name only costs some performance.
-DOWNSTREAM_IFACES="lo wlan+ swlan+ ap+ softap+ p2p+ wigig+ rndis+ ncm+ usb+ bt-pan+ eth+"
+# Cellular interface names differ per SoC, so rules are not tied to a list of
+# WAN names; see DOWNSTREAM_IFACES at the top.
 WAN_CHAIN=tshield_wan   # POSTROUTING -> skip downstream -> tshield_out
 CHAIN=tshield_out       # the actual queueing rules
 
@@ -169,41 +220,8 @@ setup_queue_rules
 # 6. TCP MSS Clamping to PMTU
 iptables -t mangle -C FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
-# 7. Transparent DNS-over-HTTPS (DoH) Redirection (Port 53 -> 53545)
-# Allowlist: only DNS from downstream (tethered) interfaces is redirected,
-# and the proxy port only accepts loopback and downstream traffic. A modem
-# interface of any name therefore can never reach the resolver, so the phone
-# is not an open resolver / DNS amplifier on a reachable carrier IP.
-DNS_NAT_CHAIN=tshield_dns
-DNS_IN_CHAIN=tshield_dns_in
-for proto in udp tcp; do
-    # Upgrade cleanup: v3.1-v3.3 redirected to 5353; v3.4-v3.5 redirected
-    # without an interface restriction; v3.6 excluded rmnet+ only.
-    iptables -t nat -D PREROUTING -p $proto --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null
-    iptables -t nat -D PREROUTING -p $proto --dport 53 -j REDIRECT --to-ports 53545 2>/dev/null
-    iptables -t nat -D PREROUTING ! -i rmnet+ -p $proto --dport 53 -j REDIRECT --to-ports 53545 2>/dev/null
-    iptables -D INPUT -i rmnet+ -p $proto --dport 53545 -j DROP 2>/dev/null
-done
-
-iptables -t nat -N $DNS_NAT_CHAIN 2>/dev/null
-iptables -t nat -F $DNS_NAT_CHAIN
-iptables -N $DNS_IN_CHAIN 2>/dev/null
-iptables -F $DNS_IN_CHAIN
-for iface in $DOWNSTREAM_IFACES; do
-    [ "$iface" = lo ] && continue
-    for proto in udp tcp; do
-        iptables -t nat -A $DNS_NAT_CHAIN -i "$iface" -p $proto --dport 53 -j REDIRECT --to-ports 53545
-    done
-done
-for iface in $DOWNSTREAM_IFACES; do
-    iptables -A $DNS_IN_CHAIN -i "$iface" -j RETURN
-done
-iptables -A $DNS_IN_CHAIN -j DROP
-iptables -t nat -C PREROUTING -j $DNS_NAT_CHAIN 2>/dev/null || iptables -t nat -A PREROUTING -j $DNS_NAT_CHAIN
-for proto in udp tcp; do
-    iptables -C INPUT -p $proto --dport 53545 -j $DNS_IN_CHAIN 2>/dev/null ||
-        iptables -I INPUT -p $proto --dport 53545 -j $DNS_IN_CHAIN
-done
+# 7. DNS redirection / proxy protection: set up in section 4, before the
+# daemon starts listening (see setup_dns_rules).
 
 # 8. Daemon Watchdog, Hotspot-Aware QoS, Power Saver Guard & Low-Latency Tuning
 # Honors BUFFERBLOAT_QOS, WIFI_POWER_SAVE_LOCK and TCP_LOW_LATENCY from

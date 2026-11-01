@@ -14,26 +14,10 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 )
 
-type dnsCacheEntry struct {
-	response  []byte
-	expiresAt time.Time
-}
-
-var (
-	dnsCache   = make(map[string]dnsCacheEntry)
-	dnsCacheMu sync.RWMutex
-)
-
-const (
-	dohMaxResponseBytes = 64 * 1024
-	dnsCacheTTL         = 60 * time.Second
-	dnsCacheMaxEntries  = 10000
-)
+const dohMaxResponseBytes = 64 * 1024
 
 // dohProvider describes a DoH resolver. The URL uses the provider's real
 // hostname so TLS certificates are verified against it; the connection is
@@ -113,28 +97,6 @@ func currentDoHProvider() dohProvider {
 	return dohProviders[defaultDoHProvider]
 }
 
-func lookupDNSCache(queryKey string, query []byte) ([]byte, bool) {
-	dnsCacheMu.RLock()
-	entry, ok := dnsCache[queryKey]
-	dnsCacheMu.RUnlock()
-	if !ok || !time.Now().Before(entry.expiresAt) {
-		return nil, false
-	}
-	resp := make([]byte, len(entry.response))
-	copy(resp, entry.response)
-	resp[0], resp[1] = query[0], query[1] // restore the caller's transaction ID
-	return resp, true
-}
-
-func storeDNSCache(queryKey string, resp []byte) {
-	dnsCacheMu.Lock()
-	defer dnsCacheMu.Unlock()
-	if len(dnsCache) > dnsCacheMaxEntries {
-		dnsCache = make(map[string]dnsCacheEntry)
-	}
-	dnsCache[queryKey] = dnsCacheEntry{response: resp, expiresAt: time.Now().Add(dnsCacheTTL)}
-}
-
 func queryDoH(query []byte) ([]byte, error) {
 	p := currentDoHProvider()
 	req, err := http.NewRequest(http.MethodPost, p.url, bytes.NewReader(query))
@@ -196,27 +158,6 @@ func resolvePlainUDP(query []byte) ([]byte, error) {
 			return append([]byte(nil), buf[:n]...), nil
 		}
 	}
-}
-
-func resolveDoH(query []byte) ([]byte, error) {
-	if len(query) < 12 {
-		return nil, fmt.Errorf("query too short")
-	}
-
-	queryKey := string(query[2:])
-	if resp, ok := lookupDNSCache(queryKey, query); ok {
-		atomic.AddUint64(&dnsCacheHits, 1)
-		return resp, nil
-	}
-
-	resp, err := queryDoH(query)
-	if err != nil {
-		// Fallback to plain DNS if DoH failed
-		return resolvePlainUDP(query)
-	}
-	atomic.AddUint64(&dohQueries, 1)
-	storeDNSCache(queryKey, resp)
-	return resp, nil
 }
 
 // resolveDNS answers a redirected client query. iptables keeps redirecting

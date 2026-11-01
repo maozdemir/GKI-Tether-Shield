@@ -63,7 +63,7 @@ func TestApplyConfigUpdate(t *testing.T) {
 
 func TestConfigHandlerRejectsCrossSiteAndNonJSON(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.conf")
-	h := configHandler(func() string { return path })
+	h := configHandler(func() string { return path }, func(*http.Request) bool { return true })
 
 	post := func(contentType, origin, body string) int {
 		r := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(body))
@@ -99,5 +99,30 @@ func TestConfigHandlerRejectsCrossSiteAndNonJSON(t *testing.T) {
 	data, err := os.ReadFile(path)
 	if err != nil || !strings.Contains(string(data), "TARGET_TTL=64") {
 		t.Fatalf("config not written: %q, %v", data, err)
+	}
+}
+
+func TestConfigHandlerRejectsUntrustedWriters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.conf")
+	h := configHandler(func() string { return path }, func(*http.Request) bool { return false })
+
+	post := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"DOH_ENABLED":"0"}`))
+	post.Host = "127.0.0.1:64640"
+	post.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h(w, post)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("untrusted POST got %d, want 403", w.Code)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("rejected write must not touch the config file")
+	}
+
+	get := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	get.Host = "127.0.0.1:64640"
+	w = httptest.NewRecorder()
+	h(w, get)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET got %d, want 200 (reads are not UID-restricted)", w.Code)
 	}
 }

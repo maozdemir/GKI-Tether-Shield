@@ -126,13 +126,20 @@ func handleConfigPost(w http.ResponseWriter, r *http.Request, configPath func() 
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
-func configHandler(configPath func() string) http.HandlerFunc {
+// configHandler serves GET/POST /api/config. canWrite decides whether the
+// caller may change settings (see auth.go); reads only need the Host/Origin
+// checks of requireTrustedLocal.
+func configHandler(configPath func() string, canWrite func(*http.Request) bool) http.HandlerFunc {
 	return requireTrustedLocal(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(cfgSnapshot())
 		case http.MethodPost:
+			if !canWrite(r) {
+				writeJSONError(w, http.StatusForbidden, "settings can only be changed from the Hotspot Shield app")
+				return
+			}
 			handleConfigPost(w, r, configPath)
 		default:
 			w.Header().Set("Allow", "GET, POST")
@@ -173,10 +180,17 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func startHTTPServer() {
+	token, err := createWebUIToken()
+	if err != nil {
+		// Without a token only UID-authorized callers (the app) can save.
+		fmt.Fprintf(os.Stderr, "web UI token: %v\n", err)
+	}
+	auth := newWriteAuthorizer(token)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", requireTrustedLocal(indexHandler))
 	mux.HandleFunc("/api/stats", requireTrustedLocal(statsHandler))
-	mux.HandleFunc("/api/config", configHandler(getConfigPath))
+	mux.HandleFunc("/api/config", configHandler(getConfigPath, auth.allowed))
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", WEB_PORT),

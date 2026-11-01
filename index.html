@@ -225,6 +225,22 @@
   <div class="toast" id="toast">Settings Saved!</div>
 
   <script>
+    // Browser fallback: action.sh opens this page with #token=... (fragments
+    // are never sent to servers). Keep it for this tab only and strip it from
+    // the address bar; the companion app is authorized by its UID instead.
+    const SHIELD_TOKEN = (() => {
+      try {
+        const match = location.hash.match(/token=([0-9a-f]+)/);
+        if (match) {
+          sessionStorage.setItem('shieldToken', match[1]);
+          history.replaceState(null, '', location.pathname);
+        }
+        return sessionStorage.getItem('shieldToken') || '';
+      } catch (e) {
+        return '';
+      }
+    })();
+
     let currentVersionCode = 360;
 
     function showToast(msg) {
@@ -301,11 +317,15 @@
       try {
         const res = await fetch('/api/config', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: SHIELD_TOKEN
+            ? { 'Content-Type': 'application/json', 'X-Shield-Token': SHIELD_TOKEN }
+            : { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
         });
         if (res.ok) {
           showToast('✅ Settings applied and DoH reloaded!');
+        } else if (res.status === 403) {
+          showToast('🔒 Open from the Magisk/KernelSU action to change settings');
         } else {
           showToast('❌ Failed to save settings');
         }

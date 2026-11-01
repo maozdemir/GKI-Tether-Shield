@@ -250,14 +250,29 @@
       setTimeout(() => toast.classList.remove('show'), 2000);
     }
 
+    const RELEASES_PREFIX = 'https://github.com/maozdemir/GKI-Tether-Shield/releases/';
+
+    function isTrustedReleaseUrl(value) {
+      if (typeof value !== 'string') return false;
+      try {
+        const url = new URL(value);
+        return url.protocol === 'https:' && url.href.startsWith(RELEASES_PREFIX);
+      } catch (e) {
+        return false;
+      }
+    }
+
     async function checkForUpdates() {
       try {
         const res = await fetch('https://raw.githubusercontent.com/maozdemir/GKI-Tether-Shield/main/update.json?t=' + Date.now());
         if (res.ok) {
           const remote = await res.json();
-          if (remote.versionCode && remote.versionCode > currentVersionCode) {
-            document.getElementById('updateVersionTag').innerText = remote.version;
-            if (remote.zipUrl) {
+          if (Number.isInteger(remote.versionCode) && remote.versionCode > currentVersionCode &&
+              typeof remote.version === 'string' && /^v[0-9][0-9A-Za-z.\-]*$/.test(remote.version)) {
+            document.getElementById('updateVersionTag').textContent = remote.version;
+            // Only ever link to this repo's release assets: a tampered
+            // update.json must not inject e.g. a javascript: URL here.
+            if (isTrustedReleaseUrl(remote.zipUrl)) {
               document.getElementById('updateDownloadBtn').href = remote.zipUrl;
             }
             document.getElementById('updateCard').style.display = 'flex';

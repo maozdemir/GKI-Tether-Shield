@@ -125,6 +125,7 @@
     .opt { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 16px; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--rule); }
     .opt label, .opt .label { font: 600 19px/1.2 var(--display); }
     .opt .hint { grid-column: 1; color: var(--muted); font-size: 13px; max-width: 46ch; }
+    .opt .hint[data-tone="warn"] { color: var(--alert); font-weight: 600; }
     .opt .more { grid-column: 1 / -1; margin-top: 4px; }
     .opt .more summary { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; list-style: none;
       font-size: 13px; font-weight: 600; color: var(--ink); text-decoration: underline; text-decoration-color: var(--rule);
@@ -231,6 +232,12 @@
         <h2 id="shield">Shield</h2>
         <p class="lede">How your shared connection is made to look like the phone's own.</p>
         <div class="opt"><label for="targetTTL">Target TTL</label><input type="number" id="targetTTL" min="1" max="255" inputmode="numeric"><span class="hint">Leave this at 64. It makes shared data look like it came from your phone.</span><span class="err" id="ttlErr" hidden>Enter a number from 1 to 255.</span><details class="more"><summary>What it does</summary><p>Every piece of data sent over the internet carries a small counter that goes down by one each time it passes through a device. Data from a laptop on your hotspot passes through your phone first, so it reaches your carrier with a different number than data from the phone itself.</p><p>Some carriers check this number to find out you're sharing your connection, then slow it down or charge you extra.</p><p>The shield sets the same number on everything that leaves your phone, so your carrier can't tell shared data apart from the phone's own. Keep 64: it's what Android phones normally use. Only change it if you know your carrier expects something else.</p></details></div>
+        <div class="opt" id="optEngine"><span class="label" id="engineLabel">TTL engine</span>
+          <div class="seg" role="radiogroup" aria-labelledby="engineLabel">
+            <input type="radio" name="ttlEngine" id="engineNfq" value="nfqueue"><label for="engineNfq">NFQUEUE</label>
+            <input type="radio" name="ttlEngine" id="engineEbpf" value="ebpf"><label for="engineEbpf">eBPF</label>
+          </div>
+          <span class="hint" id="engineHint">NFQUEUE works on every phone. eBPF is faster but new.</span><details class="more"><summary>What it does</summary><p>This chooses how the shield changes the number described above on every piece of data.</p><p><b>NFQUEUE</b> (default) hands each piece of data to the shield's own program, which changes it and hands it back. It works on every phone, but all that passing back and forth costs some speed and battery when you share a fast connection.</p><p><b>eBPF</b> asks Android's core (the kernel) to make the change itself, with no passing back and forth. It's faster and easier on the battery, but it's new: some phones don't allow it. If yours doesn't, the shield switches back to NFQUEUE on its own and says so here, so your connection stays protected either way.</p><p>Try eBPF if your hotspot feels slower with the shield on, or the phone gets warm while sharing.</p></details></div>
         <div class="opt"><label for="tcpSplitToggle">Split TLS and HTTP handshakes</label><input type="checkbox" role="switch" class="switch" id="tcpSplitToggle"><span class="hint">Hides which websites your hotspot devices visit from your carrier's filters.</span><details class="more"><summary>What it does</summary><p>When a device opens a website, the very first message it sends says the website's name, for example “youtube.com”. Carriers can read that name to spot hotspot use, or to slow down certain sites such as video.</p><p>With this on, the shield breaks that first message into two pieces, so the full name never shows up in one piece. The website still gets the whole message and works as normal.</p><p>Only the start of each connection is touched, so videos and downloads keep their full speed. Leave it on unless a website stops loading.</p></details></div>
         <div class="opt" id="optSplitMode"><span class="label" id="splitModeLabel">Where to split</span>
           <div class="seg" role="radiogroup" aria-labelledby="splitModeLabel">
@@ -425,6 +432,23 @@
       if (typeof detail === 'string') small.textContent = detail; else small.replaceChildren(...detail);
     }
 
+    const ENGINE_HINT = "NFQUEUE works on every phone. eBPF is faster but new.";
+
+    // Shows which engine is really running: eBPF can fall back to NFQUEUE.
+    function renderEngine(d) {
+      const hint = $('engineHint');
+      hint.removeAttribute('data-tone');
+      if (d.ttl_engine_setting !== 'ebpf') {
+        hint.textContent = ENGINE_HINT;
+      } else if (d.ttl_engine === 'ebpf') {
+        hint.textContent = 'eBPF is running: the kernel changes the TTL itself.';
+      } else {
+        hint.dataset.tone = 'warn';
+        hint.textContent = "This phone didn't allow eBPF, so NFQUEUE is used instead. Your connection is still protected." +
+          (d.ttl_engine_error ? ' (' + d.ttl_engine_error + ')' : '');
+      }
+    }
+
     function renderStats(d) {
       const wasDown = serviceDown;
       serviceDown = false;
@@ -433,7 +457,9 @@
       $('headlineCaption').textContent = "packets made to look like the phone's own";
       if (d.version) $('appVersion').textContent = d.version;
       if (d.version_code) currentVersionCode = d.version_code;
-      $('headlineSub').textContent = 'TTL and hop limit rewritten to ' + d.target_ttl + ' · IPv4 ' +
+      renderEngine(d);
+      $('headlineSub').textContent = 'TTL and hop limit rewritten to ' + d.target_ttl +
+        (d.ttl_engine === 'ebpf' ? ' in the kernel' : '') + ' · IPv4 ' +
         fmt(d.ipv4_packets) + ' · IPv6 ' + fmt(d.ipv6_packets) + ' packets seen.';
 
       const split = !!d.tcp_split_enabled;
@@ -551,6 +577,7 @@
         TARGET_TTL: Number($('targetTTL').value),
         SPLIT_POS: Number($('splitPos').value),
         SPLIT_MODE: $('splitFixed').checked ? 'fixed' : 'auto',
+        TTL_ENGINE: $('engineEbpf').checked ? 'ebpf' : 'nfqueue',
         DOH_PROVIDER: $('dohProvider').value
       };
       for (const [key, id] of Object.entries(SWITCHES)) body[key] = $(id).checked ? '1' : '0';
@@ -615,6 +642,7 @@
         $('targetTTL').value = cfg.TARGET_TTL || 64;
         $('splitPos').value = cfg.SPLIT_POS || 2;
         (cfg.SPLIT_MODE === 'fixed' ? $('splitFixed') : $('splitAuto')).checked = true;
+        (cfg.TTL_ENGINE === 'ebpf' ? $('engineEbpf') : $('engineNfq')).checked = true;
         if (cfg.DOH_PROVIDER) $('dohProvider').value = cfg.DOH_PROVIDER;
         for (const [key, id] of Object.entries(SWITCHES)) {
           // Missing keys (older config.conf) take the daemon's defaults.

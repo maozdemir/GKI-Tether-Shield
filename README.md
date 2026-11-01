@@ -72,6 +72,7 @@ Lastly, legacy userspace daemons ran a single-threaded queue and modified payloa
 - Packets are spread over **4 NFQUEUE workers** by flow hash (multi-core, per-flow order preserved), with **fail-open** queues: if the daemon falls behind, packets pass instead of being dropped.
 - **Works on every SoC:** instead of guessing the modem's interface name (`rmnet*`, `ccmni*`, `seth_lte*`, `v4-*` CLAT, ...), every egress interface except known hotspot/USB/Ethernet downstreams is treated as upstream.
 - Recalculates IPv4 header checksums; a watchdog restarts the daemon if it ever stops.
+- **Optional in-kernel engine (`TTL_ENGINE=ebpf`, experimental):** a small eBPF program on each upstream interface's tc egress hook rewrites TTL / hop limit in the kernel, with no copy to userspace; only the first packets of web connections still go to the daemon for DPI splitting. It coexists with Android's own tc programs (netd, clatd), follows interfaces as they appear, and falls back to NFQUEUE automatically if the kernel or SELinux refuses it; the dashboard shows which engine is running and why.
 
 ### 2. 🛡️ GoodbyeDPI / Zapret TLS ClientHello TCP Segmentation
 - Inspects initial HTTPS TLS ClientHello (SNI) and HTTP cleartext requests.
@@ -160,6 +161,9 @@ Settings can be changed in the **In-App Manager** / **WebUI**, or by editing `/d
 
 # Target TTL & Hop Limit (Default: 64, range 1-255)
 TARGET_TTL=64
+# How TTL is rewritten: nfqueue (userspace, works everywhere) or ebpf
+# (in-kernel, faster; falls back to nfqueue if the kernel refuses it)
+TTL_ENGINE=nfqueue
 
 # DPI Evasion / TCP Segmentation (Zapret / GoodbyeDPI mode)
 TCP_SPLIT=1
@@ -302,6 +306,7 @@ All Generic Kernel Image (GKI) kernels (5.4, 5.10, 5.15, 6.1, 6.6, 6.12+) runnin
 ### Requirements
 - Go 1.26+ (`go.mod` pins the toolchain; `GOTOOLCHAIN=auto` fetches it)
 - `zip` and a POSIX shell (Linux / macOS / WSL / Git Bash)
+- Only to change `bpf/ttl.c`: clang/LLVM and libbpf headers (`apt install clang llvm libbpf-dev`), then `go generate ./...` and commit the regenerated `ttl_bpfel.go` / `ttl_bpfel.o` (normal builds use the committed object and need no clang)
 - For the companion app: JDK 17 and the Android SDK (`ANDROID_HOME`) with `platforms;android-35` and `build-tools;35.0.0`
 
 ### Compiling Daemon
@@ -313,6 +318,8 @@ sh scripts/build-apk.sh   # ./HotspotShieldManager.apk from app/ (throwaway key 
 ### Testing
 ```bash
 go vet . && go test -race ./...   # Linux (or WSL) only: the daemon uses Linux syscalls
+sudo go test -race ./...          # also runs the eBPF tests: in-kernel BPF_PROG_TEST_RUN and
+                                  # real tc attachment in a throwaway network namespace
 ```
 
 ### Packaging Module ZIP

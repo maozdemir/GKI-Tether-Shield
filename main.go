@@ -10,8 +10,10 @@ import (
 	_ "embed"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -404,7 +406,9 @@ func loadConfig(path string) {
 		case "DOH_ENABLED":
 			cfg.DohEnabled = (v == "1" || strings.ToLower(v) == "true")
 		case "DOH_PROVIDER":
-			cfg.DohProvider = v
+			if _, ok := lookupDoHProvider(v); ok {
+				cfg.DohProvider = strings.ToLower(v)
+			}
 		case "QUEUE_NUM":
 			if val, err := strconv.Atoi(v); err == nil && val > 0 && val < 65535 {
 				cfg.QueueNum = uint16(val)
@@ -413,6 +417,8 @@ func loadConfig(path string) {
 	}
 }
 
+// saveConfigToFile writes the config atomically (temp file + rename) so a
+// crash mid-write never leaves an empty or truncated config behind.
 func saveConfigToFile(path string, c Config) error {
 	content := fmt.Sprintf(`# GKI Hotspot Shield Configuration
 TARGET_TTL=%d
@@ -425,96 +431,192 @@ DOH_ENABLED=%t
 DOH_PROVIDER=%s
 QUEUE_NUM=%d
 `, c.TargetTTL, c.TcpSplit, c.SplitPos, c.BufferbloatQoS, c.WifiPowerSaveLock, c.TcpLowLatency, c.DohEnabled, c.DohProvider, c.QueueNum)
-	return os.WriteFile(path, []byte(content), 0644)
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("replace %s: %w", path, err)
+	}
+	return nil
+}
+
+const maxConfigBodyBytes = 4096
+
+var trustedWebHosts = map[string]bool{
+	fmt.Sprintf("127.0.0.1:%d", WEB_PORT): true,
+	fmt.Sprintf("localhost:%d", WEB_PORT): true,
+}
+
+// isTrustedLocalRequest blocks DNS rebinding (Host must be our loopback
+// address) and cross-site requests from web pages (Origin, when a browser
+// sends one, must be our own origin). It cannot stop a local app that forges
+// both headers; that needs per-UID authentication.
+func isTrustedLocalRequest(r *http.Request) bool {
+	if !trustedWebHosts[r.Host] {
+		return false
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	host, ok := strings.CutPrefix(origin, "http://")
+	return ok && trustedWebHosts[host]
+}
+
+func requireTrustedLocal(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !isTrustedLocalRequest(r) {
+			writeJSONError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func parseBoolValue(v any) bool {
+	return v == "1" || v == true || v == "true"
+}
+
+// applyConfigUpdate returns a copy of base with the update applied. Numeric
+// values out of range are ignored (as before); an unknown DoH provider rejects
+// the whole update so arbitrary text can never reach the config file.
+func applyConfigUpdate(base Config, update map[string]any) (Config, error) {
+	next := base
+	if f, ok := update["TARGET_TTL"].(float64); ok && f > 0 && f <= 255 {
+		next.TargetTTL = uint8(f)
+	}
+	if f, ok := update["SPLIT_POS"].(float64); ok && f > 0 && f < 100 {
+		next.SplitPos = int(f)
+	}
+	boolFields := map[string]*bool{
+		"TCP_SPLIT":            &next.TcpSplit,
+		"BUFFERBLOAT_QOS":      &next.BufferbloatQoS,
+		"WIFI_POWER_SAVE_LOCK": &next.WifiPowerSaveLock,
+		"TCP_LOW_LATENCY":      &next.TcpLowLatency,
+		"DOH_ENABLED":          &next.DohEnabled,
+	}
+	for key, field := range boolFields {
+		if v, ok := update[key]; ok {
+			*field = parseBoolValue(v)
+		}
+	}
+	if v, ok := update["DOH_PROVIDER"]; ok {
+		name, _ := v.(string)
+		if _, known := lookupDoHProvider(name); !known {
+			return base, fmt.Errorf("unknown DOH_PROVIDER %q", name)
+		}
+		next.DohProvider = strings.ToLower(strings.TrimSpace(name))
+	}
+	return next, nil
+}
+
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func handleConfigPost(w http.ResponseWriter, r *http.Request, configPath func() string) {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		// Requiring JSON forces a CORS preflight for cross-origin fetches,
+		// which this server never answers.
+		writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return
+	}
+	var update map[string]any
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxConfigBodyBytes))
+	if err := dec.Decode(&update); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	next, err := applyConfigUpdate(cfg, update)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := saveConfigToFile(configPath(), next); err != nil {
+		fmt.Fprintf(os.Stderr, "save config: %v\n", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to save config")
+		return
+	}
+	cfg = next
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+func configHandler(configPath func() string) http.HandlerFunc {
+	return requireTrustedLocal(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(cfg)
+		case http.MethodPost:
+			handleConfigPost(w, r, configPath)
+		default:
+			w.Header().Set("Allow", "GET, POST")
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	})
+}
+
+func statsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	stats := map[string]any{
+		"total_packets":     atomic.LoadUint64(&totalPackets),
+		"ipv4_packets":      atomic.LoadUint64(&ipv4Packets),
+		"ipv6_packets":      atomic.LoadUint64(&ipv6Packets),
+		"ttl_modified":      atomic.LoadUint64(&ttlModified),
+		"tcp_split_packets": atomic.LoadUint64(&tcpSplitPkts),
+		"doh_queries":       atomic.LoadUint64(&dohQueries),
+		"dns_cache_hits":    atomic.LoadUint64(&dnsCacheHits),
+		"target_ttl":        cfg.TargetTTL,
+		"tcp_split_enabled": cfg.TcpSplit,
+		"doh_enabled":       cfg.DohEnabled,
+		"doh_provider":      cfg.DohProvider,
+		"version":           MODULE_VERSION,
+		"version_code":      MODULE_VERSION_CODE,
+		"updated_at":        time.Now().Format(time.RFC3339),
+	}
+	_ = json.NewEncoder(w).Encode(stats)
+}
+
+func indexHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if len(webUIHTML) > 0 {
+		_, _ = w.Write(webUIHTML)
+		return
+	}
+	http.ServeFile(w, r, getWebrootFile())
 }
 
 func startHTTPServer() {
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if len(webUIHTML) > 0 {
-			w.Write(webUIHTML)
-		} else {
-			http.ServeFile(w, r, getWebrootFile())
-		}
-	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", requireTrustedLocal(indexHandler))
+	mux.HandleFunc("/api/stats", requireTrustedLocal(statsHandler))
+	mux.HandleFunc("/api/config", configHandler(getConfigPath))
 
-	http.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		stats := map[string]interface{}{
-			"total_packets":     atomic.LoadUint64(&totalPackets),
-			"ipv4_packets":      atomic.LoadUint64(&ipv4Packets),
-			"ipv6_packets":      atomic.LoadUint64(&ipv6Packets),
-			"ttl_modified":      atomic.LoadUint64(&ttlModified),
-			"tcp_split_packets": atomic.LoadUint64(&tcpSplitPkts),
-			"doh_queries":       atomic.LoadUint64(&dohQueries),
-			"dns_cache_hits":    atomic.LoadUint64(&dnsCacheHits),
-			"target_ttl":        cfg.TargetTTL,
-			"tcp_split_enabled": cfg.TcpSplit,
-			"doh_enabled":       cfg.DohEnabled,
-			"doh_provider":      cfg.DohProvider,
-			"version":           MODULE_VERSION,
-			"version_code":      MODULE_VERSION_CODE,
-			"updated_at":        time.Now().Format(time.RFC3339),
-		}
-		json.NewEncoder(w).Encode(stats)
-	})
-
-	http.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodGet {
-			json.NewEncoder(w).Encode(cfg)
-			return
-		}
-		if r.Method == http.MethodPost {
-			body, err := io.ReadAll(r.Body)
-			if err != nil {
-				http.Error(w, err.Error(), 400)
-				return
-			}
-			var newCfg map[string]interface{}
-			if err := json.Unmarshal(body, &newCfg); err != nil {
-				http.Error(w, err.Error(), 400)
-				return
-			}
-
-			if v, ok := newCfg["TARGET_TTL"]; ok {
-				if f, ok := v.(float64); ok && f > 0 && f <= 255 {
-					cfg.TargetTTL = uint8(f)
-				}
-			}
-			if v, ok := newCfg["TCP_SPLIT"]; ok {
-				cfg.TcpSplit = (v == "1" || v == true)
-			}
-			if v, ok := newCfg["SPLIT_POS"]; ok {
-				if f, ok := v.(float64); ok && f > 0 && f < 100 {
-					cfg.SplitPos = int(f)
-				}
-			}
-			if v, ok := newCfg["BUFFERBLOAT_QOS"]; ok {
-				cfg.BufferbloatQoS = (v == "1" || v == true)
-			}
-			if v, ok := newCfg["WIFI_POWER_SAVE_LOCK"]; ok {
-				cfg.WifiPowerSaveLock = (v == "1" || v == true)
-			}
-			if v, ok := newCfg["TCP_LOW_LATENCY"]; ok {
-				cfg.TcpLowLatency = (v == "1" || v == true)
-			}
-			if v, ok := newCfg["DOH_ENABLED"]; ok {
-				cfg.DohEnabled = (v == "1" || v == true)
-			}
-			if v, ok := newCfg["DOH_PROVIDER"]; ok {
-				if s, ok := v.(string); ok && s != "" {
-					cfg.DohProvider = s
-				}
-			}
-
-			_ = saveConfigToFile(getConfigPath(), cfg)
-			w.Write([]byte(`{"status":"ok"}`))
-		}
-	})
-
+	srv := &http.Server{
+		Addr:              fmt.Sprintf("127.0.0.1:%d", WEB_PORT),
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 * 1024,
+	}
 	go func() {
-		_ = http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", WEB_PORT), nil)
+		if err := srv.ListenAndServe(); err != nil {
+			fmt.Fprintf(os.Stderr, "web UI server stopped: %v\n", err)
+		}
 	}()
 }
 

@@ -65,8 +65,12 @@ for chain in nfqttli nfqttlo; do
     iptables -t mangle -X $chain 2>/dev/null
 done
 
+start_daemon() {
+    nohup "$MODDIR/tether_shield" </dev/null >/dev/null 2>&1 &
+}
+
 killall -9 tether_shield 2>/dev/null
-nohup "$MODDIR/tether_shield" </dev/null >/dev/null 2>&1 &
+start_daemon
 
 # 5. High-Efficiency NFQUEUE Mangle Rules (chain tshield_out)
 # 1) Intercept ports 80, 443 for GoodbyeDPI / TLS SNI splitting
@@ -128,7 +132,7 @@ for proto in udp tcp; do
         iptables -I INPUT -i rmnet+ -p $proto --dport 53545 -j DROP
 done
 
-# 8. Dynamic Hotspot-Aware QoS, Power Saver Guard & Low-Latency Tuning
+# 8. Daemon Watchdog, Hotspot-Aware QoS, Power Saver Guard & Low-Latency Tuning
 # Honors BUFFERBLOAT_QOS, WIFI_POWER_SAVE_LOCK and TCP_LOW_LATENCY from
 # config.conf (re-read every tick, so WebUI changes apply within seconds).
 # Changes are applied only when the hotspot state, the interface set or a
@@ -167,6 +171,11 @@ scan_ifaces() {
     psl_ifaces=""   # interfaces we disabled Wi-Fi power save on
     low_latency=""
     while true; do
+        # Watchdog: the daemon exits on unrecoverable queue errors (and could
+        # crash); restart it so TTL fixing and DNS don't silently stop.
+        # At most one restart per tick, so a crash loop can't spin the CPU.
+        pidof tether_shield >/dev/null || start_daemon
+
         if conf_enabled TCP_LOW_LATENCY 1; then want_ll=1; else want_ll=0; fi
         if [ "$want_ll" != "$low_latency" ]; then
             if [ "$want_ll" = 1 ]; then apply_sysctls "$LL_SETTINGS"; else apply_sysctls "$LL_ORIGINALS"; fi

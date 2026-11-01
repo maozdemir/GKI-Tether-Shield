@@ -12,6 +12,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
 )
 
@@ -55,10 +56,37 @@ func rawIPLink(l netlink.Link) bool {
 	return l.Attrs().EncapType != "ether"
 }
 
+// tcNetns is a netlink handle bound to one network namespace. Its sockets
+// stay in that namespace whichever goroutine (OS thread) uses them.
+type tcNetns struct {
+	nl *netlink.Handle
+	ns netns.NsHandle
+}
+
+// currentTCNetns binds to the calling thread's network namespace.
+func currentTCNetns() (*tcNetns, error) {
+	ns, err := netns.Get()
+	if err != nil {
+		return nil, fmt.Errorf("get network namespace: %w", err)
+	}
+	nl, err := netlink.NewHandleAt(ns)
+	if err != nil {
+		ns.Close()
+		return nil, fmt.Errorf("open netlink: %w", err)
+	}
+	return &tcNetns{nl: nl, ns: ns}, nil
+}
+
+func (t *tcNetns) close() {
+	t.nl.Close()
+	t.ns.Close()
+}
+
 // tcAttacher keeps our program attached to the egress of every upstream
 // interface that is up.
 type tcAttacher struct {
 	progs *ttlProgSet
+	net   *tcNetns
 	ids   map[int]bool // kernel IDs of our loaded programs
 
 	mu       sync.Mutex
@@ -67,7 +95,7 @@ type tcAttacher struct {
 	done     chan struct{}
 }
 
-func newTCAttacher(progs *ttlProgSet) *tcAttacher {
+func newTCAttacher(progs *ttlProgSet, n *tcNetns) *tcAttacher {
 	ids := map[int]bool{}
 	for _, p := range []*ebpf.Program{progs.raw, progs.eth} {
 		if info, err := p.Info(); err == nil {
@@ -76,7 +104,7 @@ func newTCAttacher(progs *ttlProgSet) *tcAttacher {
 			}
 		}
 	}
-	return &tcAttacher{progs: progs, ids: ids, attached: map[int]string{}}
+	return &tcAttacher{progs: progs, net: n, ids: ids, attached: map[int]string{}}
 }
 
 // start attaches to the current upstreams, then follows link changes until
@@ -95,8 +123,9 @@ func (a *tcAttacher) start() error {
 func (a *tcAttacher) follow() {
 	defer close(a.done)
 	updates := make(chan netlink.LinkUpdate, 32)
-	subscribed := netlink.LinkSubscribe(updates, a.stop) == nil
-	if !subscribed {
+	ns := a.net.ns
+	opts := netlink.LinkSubscribeOptions{Namespace: &ns}
+	if err := netlink.LinkSubscribeWithOptions(updates, a.stop, opts); err != nil {
 		updates = nil // fall back to the periodic resync only
 	}
 	tick := time.NewTicker(ttlResyncEvery)
@@ -122,7 +151,7 @@ func (a *tcAttacher) follow() {
 // forgets links that went away. It returns an error only when every attach
 // attempt failed.
 func (a *tcAttacher) sync() error {
-	links, err := netlink.LinkList()
+	links, err := a.net.nl.LinkList()
 	if err != nil {
 		return fmt.Errorf("list links: %w", err)
 	}
@@ -138,7 +167,7 @@ func (a *tcAttacher) sync() error {
 			continue
 		}
 		present[attrs.Index] = true
-		if a.hasFilter(l, true) {
+		if hasTTLFilter(a.net, l, a.ids) {
 			attachedAny = true
 			continue
 		}
@@ -177,11 +206,11 @@ func ttlFilterAttrs(l netlink.Link) netlink.FilterAttrs {
 	}
 }
 
-// hasFilter reports whether our filter is on l's egress hook. With current
-// set, it must also run one of the programs this process loaded (a filter
-// left by an earlier daemon uses its old maps, so it gets replaced).
-func (a *tcAttacher) hasFilter(l netlink.Link, current bool) bool {
-	filters, err := netlink.FilterList(l, netlink.HANDLE_MIN_EGRESS)
+// hasTTLFilter reports whether our filter is on l's egress hook. With ids
+// set, it must also run one of those programs: a filter left by an earlier
+// daemon uses its old maps, so it gets replaced.
+func hasTTLFilter(n *tcNetns, l netlink.Link, ids map[int]bool) bool {
+	filters, err := n.nl.FilterList(l, netlink.HANDLE_MIN_EGRESS)
 	if err != nil {
 		return false
 	}
@@ -191,7 +220,7 @@ func (a *tcAttacher) hasFilter(l netlink.Link, current bool) bool {
 		if !ok || f.Attrs().Handle != want || !strings.HasPrefix(bf.Name, ttlFilterName) {
 			continue
 		}
-		if !current || a.ids[bf.Id] {
+		if ids == nil || ids[bf.Id] {
 			return true
 		}
 	}
@@ -201,7 +230,7 @@ func (a *tcAttacher) hasFilter(l netlink.Link, current bool) bool {
 // attach adds a clsact qdisc if the link has none (never replacing an
 // existing one, which would drop netd's filters) and installs our filter.
 func (a *tcAttacher) attach(l netlink.Link) error {
-	if err := ensureClsact(l); err != nil {
+	if err := ensureClsact(a.net, l); err != nil {
 		return err
 	}
 	prog := a.progs.eth
@@ -214,14 +243,14 @@ func (a *tcAttacher) attach(l netlink.Link) error {
 		Name:         ttlFilterName,
 		DirectAction: true,
 	}
-	if err := netlink.FilterReplace(f); err != nil {
+	if err := a.net.nl.FilterReplace(f); err != nil {
 		return fmt.Errorf("add tc filter: %w", err)
 	}
 	return nil
 }
 
-func ensureClsact(l netlink.Link) error {
-	qdiscs, err := netlink.QdiscList(l)
+func ensureClsact(n *tcNetns, l netlink.Link) error {
+	qdiscs, err := n.nl.QdiscList(l)
 	if err != nil {
 		return fmt.Errorf("list qdiscs: %w", err)
 	}
@@ -238,7 +267,7 @@ func ensureClsact(l netlink.Link) error {
 		},
 		QdiscType: "clsact",
 	}
-	if err := netlink.QdiscAdd(q); err != nil && !errors.Is(err, unix.EEXIST) {
+	if err := n.nl.QdiscAdd(q); err != nil && !errors.Is(err, unix.EEXIST) {
 		return fmt.Errorf("add clsact qdisc: %w", err)
 	}
 	return nil
@@ -254,18 +283,24 @@ func (a *tcAttacher) close() {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	links, err := netlink.LinkList()
+	removeTTLFilters(a.net)
+	a.attached = map[int]string{}
+}
+
+// removeTTLFilters removes our filter from every link that has it, whichever
+// process attached it.
+func removeTTLFilters(n *tcNetns) {
+	links, err := n.nl.LinkList()
 	if err != nil {
 		logf("eBPF: list links on detach: %v", err)
 		return
 	}
 	for _, l := range links {
-		if !a.hasFilter(l, false) {
+		if !hasTTLFilter(n, l, nil) {
 			continue
 		}
-		if err := netlink.FilterDel(&netlink.BpfFilter{FilterAttrs: ttlFilterAttrs(l)}); err != nil {
+		if err := n.nl.FilterDel(&netlink.BpfFilter{FilterAttrs: ttlFilterAttrs(l)}); err != nil {
 			logf("eBPF: detach from %s: %v", l.Attrs().Name, err)
 		}
 	}
-	a.attached = map[int]string{}
 }

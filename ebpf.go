@@ -15,18 +15,17 @@ import (
 )
 
 // TTL engines: the eBPF engine rewrites TTL / hop limit in the kernel (tc
-// egress); NFQUEUE copies each packet to this daemon. "auto" tries eBPF and
-// falls back to NFQUEUE.
+// egress); NFQUEUE copies each packet to this daemon. eBPF falls back to
+// NFQUEUE whenever it can't load or attach.
 const (
 	ttlEngineNFQueue = "nfqueue"
 	ttlEngineEBPF    = "ebpf"
-	ttlEngineAuto    = "auto"
 )
 
-// parseTTLEngine accepts nfqueue, ebpf or auto (case-insensitive).
+// parseTTLEngine accepts nfqueue or ebpf (case-insensitive).
 func parseTTLEngine(v string) (string, bool) {
 	switch e := strings.ToLower(strings.TrimSpace(v)); e {
-	case ttlEngineNFQueue, ttlEngineEBPF, ttlEngineAuto:
+	case ttlEngineNFQueue, ttlEngineEBPF:
 		return e, true
 	}
 	return "", false

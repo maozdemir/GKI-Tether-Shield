@@ -40,6 +40,18 @@ func inNewNetns(t *testing.T) {
 	})
 }
 
+// testNetns returns a netlink handle bound to the test's namespace (call
+// after inNewNetns, on the test goroutine).
+func testNetns(t *testing.T) *tcNetns {
+	t.Helper()
+	n, err := currentTCNetns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(n.close)
+	return n
+}
+
 func htons(v uint16) uint16 { return v<<8 | v>>8 }
 
 func packetSocket(t *testing.T, ifindex int, sockType int, proto uint16) int {
@@ -87,7 +99,7 @@ func markedIPv4() []byte {
 func startAttacher(t *testing.T) (*ttlProgSet, *tcAttacher) {
 	t.Helper()
 	p := loadTestPrograms(t, 64)
-	a := newTCAttacher(p)
+	a := newTCAttacher(p, testNetns(t))
 	if err := a.start(); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -115,7 +127,7 @@ func TestEBPFAttachRewritesOnEthernetLink(t *testing.T) {
 	inNewNetns(t)
 	tx, rx := addVeth(t)
 	_, a := startAttacher(t)
-	if !a.hasFilter(tx, true) {
+	if !hasTTLFilter(a.net, tx, a.ids) {
 		t.Fatal("filter not attached to tsv0 egress")
 	}
 
@@ -162,7 +174,7 @@ func TestEBPFAttachRewritesOnRawIPLink(t *testing.T) {
 		t.Fatalf("tun EncapType %q not treated as raw IP", tun.Attrs().EncapType)
 	}
 	_, a := startAttacher(t)
-	if !a.hasFilter(tun, true) {
+	if !hasTTLFilter(a.net, tun, a.ids) {
 		t.Fatal("filter not attached to the tun device")
 	}
 
@@ -194,7 +206,7 @@ func TestEBPFSkipsDownstreamAndReattaches(t *testing.T) {
 	_ = netlink.LinkSetUp(wlan)
 
 	_, a := startAttacher(t)
-	if a.hasFilter(wlan, false) {
+	if hasTTLFilter(a.net, wlan, nil) {
 		t.Fatal("attached to a downstream (hotspot) interface")
 	}
 
@@ -207,13 +219,13 @@ func TestEBPFSkipsDownstreamAndReattaches(t *testing.T) {
 			}
 		}
 	}
-	if a.hasFilter(tx, false) {
+	if hasTTLFilter(a.net, tx, nil) {
 		t.Fatal("filter survived qdisc removal")
 	}
 	if err := a.sync(); err != nil {
 		t.Fatal(err)
 	}
-	if !a.hasFilter(tx, true) {
+	if !hasTTLFilter(a.net, tx, a.ids) {
 		t.Fatal("not re-attached after the qdisc was removed")
 	}
 }
@@ -221,7 +233,7 @@ func TestEBPFSkipsDownstreamAndReattaches(t *testing.T) {
 func TestEBPFKeepsForeignFiltersAndDetachesOwn(t *testing.T) {
 	inNewNetns(t)
 	tx, _ := addVeth(t)
-	if err := ensureClsact(tx); err != nil {
+	if err := ensureClsact(testNetns(t), tx); err != nil {
 		t.Fatal(err)
 	}
 	// A filter owned by someone else (netd) on the same hook.
@@ -238,7 +250,7 @@ func TestEBPFKeepsForeignFiltersAndDetachesOwn(t *testing.T) {
 	}
 
 	p := loadTestPrograms(t, 64)
-	a := newTCAttacher(p)
+	a := newTCAttacher(p, testNetns(t))
 	if err := a.start(); err != nil {
 		t.Fatal(err)
 	}
@@ -254,13 +266,13 @@ func TestEBPFReplacesStaleFilterFromEarlierDaemon(t *testing.T) {
 	inNewNetns(t)
 	tx, _ := addVeth(t)
 	old := loadTestPrograms(t, 64)
-	oldA := newTCAttacher(old)
+	oldA := newTCAttacher(old, testNetns(t))
 	if err := oldA.sync(); err != nil {
 		t.Fatal(err)
 	}
 	// The earlier daemon died without detaching; a new one starts.
 	_, a := startAttacher(t)
-	if !a.hasFilter(tx, true) {
+	if !hasTTLFilter(a.net, tx, a.ids) {
 		t.Fatal("stale filter from the earlier program was not replaced")
 	}
 }

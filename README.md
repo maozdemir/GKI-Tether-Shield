@@ -125,6 +125,7 @@ GKI-Tether-Shield includes a modern configuration interface designed to never cl
 
 ### 1. Magisk Action Button
 - Tapping the **Action** button on the module card inside the Magisk app immediately launches the native Android configuration dashboard.
+- The app only shows the dashboard after the daemon proves its identity with a per-boot secret, so it must be opened from the Action button.
 - Includes automated HyperOS / MIUI background pop-up permission grants (`cmd appops set com.alperozd.hotspotshield 10021 allow`, etc.) to prevent vendor OS launch blocking.
 
 ### 2. Zero App Drawer Clutter
@@ -132,7 +133,7 @@ GKI-Tether-Shield includes a modern configuration interface designed to never cl
 
 ### 3. Embedded WebUI (KernelSU / APatch / Browser)
 - Embedded HTTP web server running on port `64640`.
-- Supported directly via KernelSU / APatch / MMRL WebUI button, or by navigating to `http://127.0.0.1:64640` in your phone browser.
+- Supported directly via the KernelSU / APatch / MMRL WebUI button (the page talks to the daemon through the manager's root bridge), or by navigating to `http://127.0.0.1:64640` in your phone browser (read-only unless opened from the Action button).
 
 ### 4. Command-Line Interface (`ttlshield`)
 - Run commands directly as root in Termux or an ADB shell:
@@ -140,6 +141,8 @@ GKI-Tether-Shield includes a modern configuration interface designed to never cl
   su -c ttlshield status     # Live packet counters, settings and version
   su -c ttlshield log        # Last daemon log lines (and crash output, if any)
   su -c ttlshield restart    # Restart the background daemon
+  su -c "ttlshield config get"                       # Current settings as JSON
+  su -c "ttlshield config set '{\"DOH_PROVIDER\":\"quad9\"}'"  # Change settings (same as the WebUI)
   ```
 
 ---
@@ -320,6 +323,11 @@ when `module.prop` carries a version that has no release yet:
    a `changelog.md` entry. `sh scripts/check-version.sh` verifies they agree;
    the daemon, WebUI and installer read the version from `module.prop`.
 2. Merge to `main`. The workflow tags that commit and publishes the release.
+
+The companion APK is built in CI from `app/`. To sign releases with a stable
+key, add the repository secrets `APK_KEYSTORE_B64` (base64 of a keystore),
+`APK_KEYSTORE_PASSWORD` and `APK_KEY_ALIAS`; without them each build uses a
+throwaway key and the installer reinstalls the app on signature changes.
 
 Pushes that don't change the version build and test only; an existing
 release is never modified.

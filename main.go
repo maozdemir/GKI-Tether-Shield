@@ -187,7 +187,10 @@ var dohClient = &http.Client{
 
 // androidCertDirs lists where Android keeps trusted root CAs. Go only adds
 // these automatically for GOOS=android, but the daemon is built as GOOS=linux.
-const androidCertDirs = "/apex/com.android.conscrypt/cacerts:/system/etc/security/cacerts:/data/misc/keychain/certs-added"
+// User-installed CAs (/data/misc/keychain/certs-added) are deliberately excluded:
+// they are how corporate/carrier TLS interception works, and Android apps
+// targeting API 24+ do not trust them by default either.
+const androidCertDirs = "/apex/com.android.conscrypt/cacerts:/system/etc/security/cacerts"
 
 func configureAndroidCertDirs() {
 	if os.Getenv("SSL_CERT_DIR") == "" {

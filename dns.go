@@ -338,7 +338,7 @@ func listenDNS(port int) (net.PacketConn, net.Listener, error) {
 func startDNSServer() {
 	pc, l, err := listenDNS(DNS_PORT)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
+		logf("%v", err)
 		return
 	}
 	go serveDNSUDP(pc)

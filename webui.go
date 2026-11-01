@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"mime"
 	"net/http"
-	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -117,7 +116,7 @@ func handleConfigPost(w http.ResponseWriter, r *http.Request, configPath func() 
 		return
 	}
 	if err := saveConfigToFile(configPath(), next); err != nil {
-		fmt.Fprintf(os.Stderr, "save config: %v\n", err)
+		logf("save config: %v", err)
 		writeJSONError(w, http.StatusInternalServerError, "failed to save config")
 		return
 	}
@@ -183,7 +182,7 @@ func startHTTPServer() {
 	token, err := createWebUIToken()
 	if err != nil {
 		// Without a token only UID-authorized callers (the app) can save.
-		fmt.Fprintf(os.Stderr, "web UI token: %v\n", err)
+		logf("web UI token: %v", err)
 	}
 	auth := newWriteAuthorizer(token)
 
@@ -203,7 +202,7 @@ func startHTTPServer() {
 	}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
-			fmt.Fprintf(os.Stderr, "web UI server stopped: %v\n", err)
+			logf("web UI server stopped: %v", err)
 		}
 	}()
 }

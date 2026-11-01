@@ -145,7 +145,7 @@ func loadConfigFile(path string, base Config) Config {
 	f, err := os.Open(path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintf(os.Stderr, "read config %s: %v\n", path, err)
+			logf("read config %s: %v", path, err)
 		}
 		return base
 	}

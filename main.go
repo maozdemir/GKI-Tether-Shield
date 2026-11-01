@@ -86,7 +86,7 @@ func writeStats() {
 		time.Now().Format(time.RFC3339),
 	)
 	if err := writeFileAtomic(getStatsPath(), []byte(jsonContent), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "write stats: %v\n", err)
+		logf("write stats: %v", err)
 	}
 }
 
@@ -103,6 +103,7 @@ func main() {
 
 	_ = syscall.Setpriority(syscall.PRIO_PROCESS, 0, -20)
 
+	initLogging()
 	configureAndroidCertDirs()
 	setCfg(loadConfigFile(getConfigPath(), defaultConfig))
 	startCfg := cfgSnapshot()
@@ -113,8 +114,8 @@ func main() {
 	// Start embedded HTTP WebUI Config Server
 	startHTTPServer()
 
-	fmt.Printf("Starting GKI Hotspot Shield (WebUI: %d, DoH DNS: %d, Target TTL: %d, TCP Split: %v)...\n",
-		WEB_PORT, DNS_PORT, startCfg.TargetTTL, startCfg.TcpSplit)
+	logf("Starting %s (WebUI: %d, DoH DNS: %d, Target TTL: %d, TCP Split: %v)",
+		MODULE_VERSION, WEB_PORT, DNS_PORT, startCfg.TargetTTL, startCfg.TcpSplit)
 
 	rawFd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
 	if err == nil {
@@ -124,10 +125,10 @@ func main() {
 
 	queues, err := openQueues(startCfg.QueueNum, NUM_QUEUES)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "NFQUEUE setup failed: %v\n", err)
+		logf("NFQUEUE setup failed: %v", err)
 		os.Exit(1)
 	}
-	fmt.Printf("NFQUEUE initialized on queues %d-%d. Running...\n", startCfg.QueueNum, startCfg.QueueNum+NUM_QUEUES-1)
+	logf("NFQUEUE initialized on queues %d-%d", startCfg.QueueNum, startCfg.QueueNum+NUM_QUEUES-1)
 
 	ticker := time.NewTicker(3 * time.Second)
 	go func() {
@@ -157,7 +158,7 @@ func main() {
 	}
 	// Any queue dying means its share of traffic bypasses TTL fixing, so exit
 	// and let the service.sh watchdog restart the daemon with all queues bound.
-	fmt.Fprintf(os.Stderr, "%v\n", <-errs)
+	logf("exiting: %v", <-errs)
 	closeQueues(queues)
 	os.Exit(1)
 }

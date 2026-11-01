@@ -149,8 +149,11 @@ setup_dns_rules() {
     done
 }
 
+# Daemon messages go to $MODDIR/daemon.log (size-capped by the daemon).
+# Raw stderr (e.g. a Go crash trace) goes to daemon.stderr, truncated on each
+# start so a crash loop cannot fill the disk; it keeps the last run's trace.
 start_daemon() {
-    nohup "$MODDIR/tether_shield" </dev/null >/dev/null 2>&1 &
+    nohup "$MODDIR/tether_shield" </dev/null >"$MODDIR/daemon.stderr" 2>&1 &
 }
 
 killall -9 tether_shield 2>/dev/null

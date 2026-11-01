@@ -4,8 +4,6 @@ package main
 
 import (
 	"encoding/binary"
-	"fmt"
-	"os"
 	"sync/atomic"
 	"syscall"
 )
@@ -190,7 +188,7 @@ func handlePacket(fd, rawFd int, qNum uint16, packetID uint32, payload []byte) {
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "packet %d: recovered from panic: %v\n", packetID, r)
+			packetLogf("packet %d: recovered from panic: %v", packetID, r)
 			if !verdictSent {
 				_ = sendVerdict(fd, qNum, packetID, NF_ACCEPT, nil)
 			}

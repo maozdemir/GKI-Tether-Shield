@@ -2,8 +2,13 @@ name: Build and Release Magisk Module
 
 # Every push and pull request builds and tests. A push to main also
 # publishes a GitHub release when module.prop carries a version that has no
-# release yet (bump module.prop/update.json/main.go to release). Existing
-# releases are never modified.
+# release yet (bump module.prop/update.json to release). Existing releases
+# are never modified.
+#
+# The companion APK is built from app/. Release builds are signed with the
+# key in the APK_KEYSTORE_B64 / APK_KEYSTORE_PASSWORD / APK_KEY_ALIAS secrets
+# when set; otherwise (and for PR builds) a throwaway key is used and the
+# installer reinstalls the app on signature changes.
 on:
   push:
     branches:
@@ -34,8 +39,20 @@ jobs:
           go vet .
           go test -race .
 
+      - name: Set up JDK
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK components
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" >/dev/null
+
       - name: Build arm64 binary
         run: sh scripts/build.sh
+
+      - name: Build companion APK (throwaway signing key)
+        run: sh scripts/build-apk.sh
 
       - name: Package module ZIP
         run: |
@@ -88,12 +105,27 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Set up JDK
+        if: steps.version.outputs.publish == 'true'
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK components
+        if: steps.version.outputs.publish == 'true'
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" >/dev/null
+
       - name: Build and package
         if: steps.version.outputs.publish == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          APK_KEYSTORE_B64: ${{ secrets.APK_KEYSTORE_B64 }}
+          APK_KEYSTORE_PASSWORD: ${{ secrets.APK_KEYSTORE_PASSWORD }}
+          APK_KEY_ALIAS: ${{ secrets.APK_KEY_ALIAS }}
         run: |
           sh scripts/build.sh
+          sh scripts/build-apk.sh
           sh scripts/package.sh "$VERSION" dist
           (cd dist && sha256sum *.zip > SHA256SUMS)
 

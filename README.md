@@ -293,11 +293,12 @@ All Generic Kernel Image (GKI) kernels (5.4, 5.10, 5.15, 6.1, 6.6, 6.12+) runnin
 ### Requirements
 - Go 1.26+ (`go.mod` pins the toolchain; `GOTOOLCHAIN=auto` fetches it)
 - `zip` and a POSIX shell (Linux / macOS / WSL / Git Bash)
-- Android SDK (build-tools 34+) for companion APK compilation (optional)
+- For the companion app: JDK 17 and the Android SDK (`ANDROID_HOME`) with `platforms;android-35` and `build-tools;35.0.0`
 
 ### Compiling Daemon
 ```bash
-sh scripts/build.sh   # arm64 binary ./tether_shield, version taken from module.prop
+sh scripts/build.sh       # arm64 binary ./tether_shield, version taken from module.prop
+sh scripts/build-apk.sh   # ./HotspotShieldManager.apk from app/ (throwaway key unless APK_KEYSTORE_* are set)
 ```
 
 ### Testing

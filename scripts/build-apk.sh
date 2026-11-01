@@ -32,6 +32,9 @@ ZIPALIGN="$(tool zipalign)"
 APKSIGNER="$(tool apksigner)"
 [ -f "$ANDROID_JAR" ] || { echo "missing $ANDROID_JAR" >&2; exit 1; }
 
+# JDK tools: prefer $JAVA_HOME (CI sets up JDK 17), else PATH.
+JBIN="${JAVA_HOME:+$JAVA_HOME/bin/}"
+
 prop() { grep "^$1=" "$ROOT/module.prop" | head -n1 | cut -d= -f2 | tr -d '\r'; }
 VERSION="$(prop version)"
 CODE="$(prop versionCode)"
@@ -48,12 +51,14 @@ mkdir -p "$WORK/classes" "$WORK/dex"
     -o "$WORK/unsigned.apk" "$WORK/res.zip"
 
 # 2. Code: Java -> class files -> dex.
-javac -source 11 -target 11 -nowarn -encoding UTF-8 \
-    -bootclasspath "$ANDROID_JAR" -classpath "$ANDROID_JAR" \
+# android.jar replaces the JDK's class library, which javac only allows for
+# Java 8 source; d8 then compiles the classes to Android bytecode.
+"${JBIN}javac" -source 8 -target 8 -Xlint:-options -encoding UTF-8 \
+    -bootclasspath "$ANDROID_JAR" \
     -d "$WORK/classes" $(find "$ROOT/app/src" -name '*.java')
 "$D8" --release --min-api 26 --lib "$ANDROID_JAR" --output "$WORK/dex" \
     $(find "$WORK/classes" -name '*.class')
-(cd "$WORK/dex" && jar -u -M -f "$WORK/unsigned.apk" classes.dex)
+(cd "$WORK/dex" && "${JBIN}jar" -u -M -f "$WORK/unsigned.apk" classes.dex)
 
 # 3. Align and sign.
 "$ZIPALIGN" -p -f 4 "$WORK/unsigned.apk" "$WORK/aligned.apk"
@@ -68,7 +73,7 @@ else
     ALIAS=throwaway
     APK_KS_PASS="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
     export APK_KS_PASS
-    keytool -genkeypair -keystore "$KS" -storetype PKCS12 -alias "$ALIAS" \
+    "${JBIN}keytool" -genkeypair -keystore "$KS" -storetype PKCS12 -alias "$ALIAS" \
         -keyalg RSA -keysize 3072 -validity 10000 -dname "CN=GKI Tether Shield" \
         -storepass "$APK_KS_PASS" -keypass "$APK_KS_PASS" >/dev/null 2>&1
     echo "signing with a throwaway key (no APK_KEYSTORE_B64 set)"

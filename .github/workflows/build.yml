@@ -1,14 +1,13 @@
 name: Build and Release Magisk Module
 
-# Pushes and pull requests only build and test. A GitHub release is created
-# exclusively by pushing a version tag (e.g. `git tag v3.6 && git push origin v3.6`)
-# that matches module.prop; an existing release is never modified.
+# Every push and pull request builds and tests. A push to main also
+# publishes a GitHub release when module.prop carries a version that has no
+# release yet (bump module.prop/update.json/main.go to release). Existing
+# releases are never modified.
 on:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
   pull_request:
   workflow_dispatch:
 
@@ -36,7 +35,7 @@ jobs:
           go test -race .
 
       - name: Build arm64 binary
-        run: GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o nfqttl .
+        run: GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o tether_shield .
 
       - name: Package module ZIP
         run: |
@@ -52,12 +51,14 @@ jobs:
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
     env:
-      TAG: ${{ github.ref_name }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout repository
@@ -65,42 +66,59 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Decide whether to publish
+        id: version
+        run: |
+          VERSION=$(grep '^version=' module.prop | cut -d= -f2 | tr -d '\r')
+          sh scripts/check-version.sh "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "::notice::Release $VERSION already exists and is left untouched. Bump the version in module.prop to publish a new release."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          elif git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            echo "::error::Tag $VERSION already exists without a release; delete the tag or bump the version."
+            exit 1
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Go
+        if: steps.version.outputs.publish == 'true'
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.24'
 
-      - name: Verify tag
-        run: |
-          sh scripts/check-version.sh "$TAG"
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main ||
-            { echo "::error::$TAG does not point at a commit on main"; exit 1; }
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "::error::Release $TAG already exists; bump the version instead of rebuilding it"
-            exit 1
-          fi
-
       - name: Build and package
+        if: steps.version.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o nfqttl .
-          sh scripts/package.sh "$TAG" dist
+          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o tether_shield .
+          sh scripts/package.sh "$VERSION" dist
           (cd dist && sha256sum *.zip > SHA256SUMS)
 
       - name: Generate release notes
+        if: steps.version.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)
           {
-            echo "## What's Changed in $TAG"
+            echo "## What's Changed in $VERSION"
             echo
             if [ -n "$PREV_TAG" ]; then
-              git log "$PREV_TAG..$TAG" --pretty=format:"* %s (%h)" --no-merges
+              git log "$PREV_TAG..HEAD" --pretty=format:"* %s (%h)" --no-merges
             else
-              git log "$TAG" --pretty=format:"* %s (%h)" --no-merges
+              git log --pretty=format:"* %s (%h)" --no-merges
             fi
             echo
           } > release-notes.md
 
       - name: Create GitHub release
+        if: steps.version.outputs.publish == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file release-notes.md \
-            dist/GKI_Tether_Shield_"$TAG".zip dist/GKI_Hotspot_Shield_"$TAG".zip dist/SHA256SUMS
+          gh release create "$VERSION" --target "$GITHUB_SHA" --title "$VERSION" \
+            --notes-file release-notes.md \
+            dist/GKI_Tether_Shield_"$VERSION".zip dist/GKI_Hotspot_Shield_"$VERSION".zip dist/SHA256SUMS

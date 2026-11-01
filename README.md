@@ -287,10 +287,10 @@ All Generic Kernel Image (GKI) kernels (5.4, 5.10, 5.15, 6.1, 6.6, 6.12+) runnin
 ### Compiling Daemon
 ```bash
 # Windows PowerShell
-$env:GOOS="linux"; $env:GOARCH="arm64"; go build -trimpath -ldflags="-s -w" -o nfqttl .
+$env:GOOS="linux"; $env:GOARCH="arm64"; go build -trimpath -ldflags="-s -w" -o tether_shield .
 
 # Linux / macOS
-GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o nfqttl .
+GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o tether_shield .
 ```
 
 ### Testing
@@ -304,18 +304,17 @@ sh scripts/package.sh v3.5-dev dist   # writes dist/GKI_Tether_Shield_v3.5-dev.z
 ```
 
 ### Releasing
-Pushes to `main` and pull requests only build and test; the module ZIP is
-attached to the workflow run as an artifact. A GitHub release is created only
-when a version tag is pushed:
+Every push and pull request builds and tests; the module ZIP is attached to
+the workflow run as an artifact. A push to `main` also publishes a release
+when `module.prop` carries a version that has no release yet:
 
 1. Bump `version` / `versionCode` in `module.prop`, `MODULE_VERSION` /
    `MODULE_VERSION_CODE` in `main.go`, and `update.json`; add a `changelog.md`
    entry. `sh scripts/check-version.sh` verifies they agree.
-2. Merge to `main`, then tag that commit: `git tag v3.6 && git push origin v3.6`.
+2. Merge to `main`. The workflow tags that commit and publishes the release.
 
-The release job refuses tags that don't match `module.prop`, tags not on
-`main`, and versions that already have a release, so a published release is
-never overwritten.
+Pushes that don't change the version build and test only; an existing
+release is never modified.
 
 ---
 

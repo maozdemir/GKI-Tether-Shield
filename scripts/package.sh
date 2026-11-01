@@ -1,7 +1,7 @@
 #!/bin/sh
 # Package the Magisk/KernelSU/APatch module ZIP.
 # Usage: scripts/package.sh <version-tag> [output-dir]
-# Expects the arm64 daemon binary ./nfqttl to be built already.
+# Expects the arm64 daemon binary ./tether_shield to be built already.
 set -eu
 
 TAG="${1:?usage: scripts/package.sh <version-tag> [output-dir]}"
@@ -10,17 +10,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
-[ -f "$ROOT/nfqttl" ] || { echo "error: $ROOT/nfqttl not found; build it first" >&2; exit 1; }
+[ -f "$ROOT/tether_shield" ] || { echo "error: $ROOT/tether_shield not found; build it first" >&2; exit 1; }
 
 for f in module.prop config.conf service.sh customize.sh action.sh uninstall.sh \
-         HotspotShieldManager.apk nfqttl update.json changelog.md; do
+         HotspotShieldManager.apk tether_shield update.json changelog.md; do
     cp "$ROOT/$f" "$STAGE/"
 done
 cp -R "$ROOT/META-INF" "$STAGE/"
 mkdir -p "$STAGE/system/bin" "$STAGE/webroot"
 cp "$ROOT/scripts/ttlshield" "$STAGE/system/bin/ttlshield"
 cp "$ROOT/index.html" "$STAGE/webroot/index.html"
-chmod 0755 "$STAGE/nfqttl" "$STAGE"/*.sh "$STAGE/system/bin/ttlshield"
+chmod 0755 "$STAGE/tether_shield" "$STAGE"/*.sh "$STAGE/system/bin/ttlshield"
 
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd)"

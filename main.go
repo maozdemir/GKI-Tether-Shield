@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	_ "embed"
 	"encoding/binary"
@@ -120,35 +121,85 @@ var (
 	dnsCacheMu sync.RWMutex
 )
 
+const (
+	dohMaxResponseBytes = 64 * 1024
+	dnsCacheTTL         = 60 * time.Second
+	dnsCacheMaxEntries  = 10000
+)
+
+// dohProvider describes a DoH resolver. The URL uses the provider's real
+// hostname so TLS certificates are verified against it; the connection is
+// dialed straight to the pinned IP so no bootstrap DNS lookup is needed.
+type dohProvider struct {
+	url  string
+	host string
+	ip   string
+}
+
+var dohProviders = map[string]dohProvider{
+	"cloudflare": {url: "https://cloudflare-dns.com/dns-query", host: "cloudflare-dns.com", ip: "1.1.1.1"},
+	"quad9":      {url: "https://dns.quad9.net/dns-query", host: "dns.quad9.net", ip: "9.9.9.9"},
+	"google":     {url: "https://dns.google/dns-query", host: "dns.google", ip: "8.8.8.8"},
+	"adguard":    {url: "https://dns.adguard-dns.com/dns-query", host: "dns.adguard-dns.com", ip: "94.140.14.14"},
+}
+
+const defaultDoHProvider = "cloudflare"
+
+func lookupDoHProvider(name string) (dohProvider, bool) {
+	p, ok := dohProviders[strings.ToLower(strings.TrimSpace(name))]
+	return p, ok
+}
+
+// pinnedDoHAddr maps "host:port" of a known DoH provider to "ip:port".
+// Unknown hosts are refused so the client can never be steered elsewhere.
+func pinnedDoHAddr(addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("invalid DoH address %q: %w", addr, err)
+	}
+	for _, p := range dohProviders {
+		if p.host == host {
+			return net.JoinHostPort(p.ip, port), nil
+		}
+	}
+	return "", fmt.Errorf("refusing to dial unknown DoH host %q", host)
+}
+
+var dohDialer = &net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second}
+
 var dohClient = &http.Client{
 	Timeout: 3 * time.Second,
 	Transport: &http.Transport{
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 20,
 		IdleConnTimeout:     90 * time.Second,
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
+		ForceAttemptHTTP2:   true,
+		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			pinned, err := pinnedDoHAddr(addr)
+			if err != nil {
+				return nil, err
+			}
+			return dohDialer.DialContext(ctx, network, pinned)
 		},
-		DialContext: (&net.Dialer{
-			Timeout:   2 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
 	},
 }
 
-func getDoHURL() (string, string) {
-	switch strings.ToLower(cfg.DohProvider) {
-	case "quad9":
-		return "https://9.9.9.9/dns-query", "9.9.9.9"
-	case "google":
-		return "https://8.8.8.8/dns-query", "dns.google"
-	case "adguard":
-		return "https://94.140.14.14/dns-query", "dns.adguard-dns.com"
-	case "cloudflare":
-		fallthrough
-	default:
-		return "https://1.1.1.1/dns-query", "cloudflare-dns.com"
+// androidCertDirs lists where Android keeps trusted root CAs. Go only adds
+// these automatically for GOOS=android, but the daemon is built as GOOS=linux.
+const androidCertDirs = "/apex/com.android.conscrypt/cacerts:/system/etc/security/cacerts:/data/misc/keychain/certs-added"
+
+func configureAndroidCertDirs() {
+	if os.Getenv("SSL_CERT_DIR") == "" {
+		_ = os.Setenv("SSL_CERT_DIR", androidCertDirs)
 	}
+}
+
+func currentDoHProvider() dohProvider {
+	if p, ok := lookupDoHProvider(cfg.DohProvider); ok {
+		return p
+	}
+	return dohProviders[defaultDoHProvider]
 }
 
 // resolveFallbackUDP forwards to 1.1.1.1:53 if DoH fails or times out
@@ -172,62 +223,74 @@ func resolveFallbackUDP(query []byte) ([]byte, error) {
 	return buf[:n], nil
 }
 
+func lookupDNSCache(queryKey string, query []byte) ([]byte, bool) {
+	dnsCacheMu.RLock()
+	entry, ok := dnsCache[queryKey]
+	dnsCacheMu.RUnlock()
+	if !ok || !time.Now().Before(entry.expiresAt) {
+		return nil, false
+	}
+	resp := make([]byte, len(entry.response))
+	copy(resp, entry.response)
+	resp[0], resp[1] = query[0], query[1] // restore the caller's transaction ID
+	return resp, true
+}
+
+func storeDNSCache(queryKey string, resp []byte) {
+	dnsCacheMu.Lock()
+	defer dnsCacheMu.Unlock()
+	if len(dnsCache) > dnsCacheMaxEntries {
+		dnsCache = make(map[string]dnsCacheEntry)
+	}
+	dnsCache[queryKey] = dnsCacheEntry{response: resp, expiresAt: time.Now().Add(dnsCacheTTL)}
+}
+
+func queryDoH(query []byte) ([]byte, error) {
+	p := currentDoHProvider()
+	req, err := http.NewRequest(http.MethodPost, p.url, bytes.NewReader(query))
+	if err != nil {
+		return nil, fmt.Errorf("build DoH request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/dns-message")
+	req.Header.Set("Accept", "application/dns-message")
+
+	resp, err := dohClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("DoH request to %s: %w", p.host, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("DoH %s returned status %d", p.host, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, dohMaxResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("read DoH response: %w", err)
+	}
+	if len(body) < 12 {
+		return nil, fmt.Errorf("DoH %s returned a truncated response", p.host)
+	}
+	return body, nil
+}
+
 func resolveDoH(query []byte) ([]byte, error) {
 	if len(query) < 12 {
 		return nil, fmt.Errorf("query too short")
 	}
 
 	queryKey := string(query[2:])
-
-	dnsCacheMu.RLock()
-	if entry, ok := dnsCache[queryKey]; ok {
-		if time.Now().Before(entry.expiresAt) {
-			dnsCacheMu.RUnlock()
-			atomic.AddUint64(&dnsCacheHits, 1)
-			resp := make([]byte, len(entry.response))
-			copy(resp, entry.response)
-			resp[0] = query[0]
-			resp[1] = query[1]
-			return resp, nil
-		}
-	}
-	dnsCacheMu.RUnlock()
-
-	dohURL, hostHeader := getDoHURL()
-
-	req, err := http.NewRequest("POST", dohURL, bytes.NewReader(query))
-	if err == nil {
-		req.Header.Set("Content-Type", "application/dns-message")
-		req.Header.Set("Accept", "application/dns-message")
-		req.Header.Set("Host", hostHeader)
-
-		resp, err := dohClient.Do(req)
-		if err == nil && resp.StatusCode == http.StatusOK {
-			defer resp.Body.Close()
-			respBody, err := io.ReadAll(resp.Body)
-			if err == nil && len(respBody) > 0 {
-				atomic.AddUint64(&dohQueries, 1)
-
-				dnsCacheMu.Lock()
-				if len(dnsCache) > 10000 {
-					dnsCache = make(map[string]dnsCacheEntry)
-				}
-				dnsCache[queryKey] = dnsCacheEntry{
-					response:  respBody,
-					expiresAt: time.Now().Add(60 * time.Second),
-				}
-				dnsCacheMu.Unlock()
-
-				return respBody, nil
-			}
-		}
-		if resp != nil {
-			resp.Body.Close()
-		}
+	if resp, ok := lookupDNSCache(queryKey, query); ok {
+		atomic.AddUint64(&dnsCacheHits, 1)
+		return resp, nil
 	}
 
-	// Fallback to direct UDP DNS if DoH failed
-	return resolveFallbackUDP(query)
+	resp, err := queryDoH(query)
+	if err != nil {
+		// Fallback to direct UDP DNS if DoH failed
+		return resolveFallbackUDP(query)
+	}
+	atomic.AddUint64(&dohQueries, 1)
+	storeDNSCache(queryKey, resp)
+	return resp, nil
 }
 
 func startDNSServer() {
@@ -845,6 +908,7 @@ func main() {
 
 	_ = syscall.Setpriority(syscall.PRIO_PROCESS, 0, -20)
 
+	configureAndroidCertDirs()
 	loadConfig(getConfigPath())
 
 	// Start embedded DoH DNS Interceptor

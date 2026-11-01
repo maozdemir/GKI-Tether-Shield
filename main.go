@@ -1,3 +1,5 @@
+//go:build linux
+
 package main
 
 import (
@@ -623,15 +625,61 @@ func isHTTPRequest(payload []byte) bool {
 	return s == "GET " || s == "POST" || s == "HEAD" || s == "PUT " || s == "OPTI"
 }
 
+const (
+	ipv4MinHeaderLen = 20
+	tcpMinHeaderLen  = 20
+	ipProtoTCP       = 6
+	ipFragOffsetMask = 0x1FFF
+	ipFlagMoreFrags  = 0x2000
+)
+
+// ipv4TCPHeaderLens validates an IPv4/TCP packet and returns its IP and TCP
+// header lengths. ok is false for anything malformed, non-TCP, or fragmented,
+// so callers can safely slice payload[ihl+tcphl:].
+func ipv4TCPHeaderLens(payload []byte) (ihl, tcphl int, ok bool) {
+	if len(payload) < ipv4MinHeaderLen || payload[0]>>4 != 4 || payload[9] != ipProtoTCP {
+		return 0, 0, false
+	}
+	ihl = int(payload[0]&0x0F) * 4
+	if ihl < ipv4MinHeaderLen || len(payload) < ihl+tcpMinHeaderLen {
+		return 0, 0, false
+	}
+	fragField := binary.BigEndian.Uint16(payload[6:8])
+	if fragField&(ipFragOffsetMask|ipFlagMoreFrags) != 0 {
+		return 0, 0, false
+	}
+	tcphl = int(payload[ihl+12]>>4) * 4
+	if tcphl < tcpMinHeaderLen || ihl+tcphl > len(payload) {
+		return 0, 0, false
+	}
+	return ihl, tcphl, true
+}
+
+func isWebPort(port uint16) bool {
+	return port == 80 || port == 443 || port == 8080 || port == 8443
+}
+
+// isWebSplitCandidate reports whether payload is a well-formed IPv4 TCP packet
+// to a web port whose data starts with a TLS ClientHello or an HTTP request.
+// Only web ports are considered: P2P protocols carry arbitrary binary data that
+// can look like HTTP/TLS, and splitting them corrupts transfers.
+func isWebSplitCandidate(payload []byte) bool {
+	ihl, tcphl, ok := ipv4TCPHeaderLens(payload)
+	if !ok {
+		return false
+	}
+	if !isWebPort(binary.BigEndian.Uint16(payload[ihl+2 : ihl+4])) {
+		return false
+	}
+	tcpPayload := payload[ihl+tcphl:]
+	return isTLSClientHello(tcpPayload) || isHTTPRequest(tcpPayload)
+}
+
 func splitAndSendIPv4TCP(rawFd int, payload []byte, splitPos int) bool {
-	if len(payload) < 40 {
+	ihl, tcphl, ok := ipv4TCPHeaderLens(payload)
+	if !ok {
 		return false
 	}
-	ihl := int(payload[0]&0x0F) * 4
-	if len(payload) < ihl+20 {
-		return false
-	}
-	tcphl := int((payload[ihl+12]>>4)&0x0F) * 4
 	headerLen := ihl + tcphl
 	dataLen := len(payload) - headerLen
 
@@ -677,6 +725,9 @@ func splitAndSendIPv4TCP(rawFd int, payload []byte, splitPos int) bool {
 		Addr: dstAddr,
 	}
 
+	if rawFd < 0 {
+		return false
+	}
 	if err := syscall.Sendto(rawFd, pkt1, 0, sa); err != nil {
 		return false
 	}
@@ -685,6 +736,69 @@ func splitAndSendIPv4TCP(rawFd int, payload []byte, splitPos int) bool {
 	}
 
 	return true
+}
+
+// handlePacket issues exactly one verdict for every queued packet. A panic
+// while parsing must never leave a packet without a verdict (it would stall in
+// the queue) or kill the daemon (TTL normalization would silently stop).
+func handlePacket(fd, rawFd int, qNum uint16, packetID uint32, payload []byte) {
+	verdictSent := false
+	verdict := func(v uint32, data []byte) {
+		verdictSent = true
+		_ = sendVerdict(fd, qNum, packetID, v, data)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "packet %d: recovered from panic: %v\n", packetID, r)
+			if !verdictSent {
+				_ = sendVerdict(fd, qNum, packetID, NF_ACCEPT, nil)
+			}
+		}
+	}()
+
+	if len(payload) == 0 {
+		verdict(NF_ACCEPT, nil)
+		return
+	}
+
+	switch version := payload[0] >> 4; {
+	case version == 4 && len(payload) >= ipv4MinHeaderLen:
+		handleIPv4(payload, rawFd, verdict)
+	case version == 6 && len(payload) >= 40:
+		atomic.AddUint64(&ipv6Packets, 1)
+		if payload[7] != cfg.TargetTTL {
+			payload[7] = cfg.TargetTTL
+			atomic.AddUint64(&ttlModified, 1)
+			verdict(NF_ACCEPT, payload)
+			return
+		}
+		verdict(NF_ACCEPT, nil)
+	default:
+		verdict(NF_ACCEPT, nil)
+	}
+}
+
+func handleIPv4(payload []byte, rawFd int, verdict func(uint32, []byte)) {
+	atomic.AddUint64(&ipv4Packets, 1)
+
+	if cfg.TcpSplit && rawFd > 0 && isWebSplitCandidate(payload) &&
+		splitAndSendIPv4TCP(rawFd, payload, cfg.SplitPos) {
+		atomic.AddUint64(&tcpSplitPkts, 1)
+		atomic.AddUint64(&ttlModified, 1)
+		verdict(NF_DROP, nil)
+		return
+	}
+
+	ihl := int(payload[0]&0x0F) * 4
+	if ihl < ipv4MinHeaderLen || ihl > len(payload) || payload[8] == cfg.TargetTTL {
+		verdict(NF_ACCEPT, nil)
+		return
+	}
+	payload[8] = cfg.TargetTTL
+	payload[10], payload[11] = 0, 0
+	binary.BigEndian.PutUint16(payload[10:12], calcChecksum(payload[:ihl]))
+	atomic.AddUint64(&ttlModified, 1)
+	verdict(NF_ACCEPT, payload)
 }
 
 func writeStats() {
@@ -841,61 +955,8 @@ func main() {
 					attrOffset += (aLen + 3) & ^3
 				}
 
-				if packetID != 0 && len(payload) > 0 {
-					version := payload[0] >> 4
-
-					if version == 4 && len(payload) >= 20 {
-						atomic.AddUint64(&ipv4Packets, 1)
-						ihl := int(payload[0]&0x0F) * 4
-						proto := payload[9]
-
-						// CRITICAL FIX: Only apply TCP Split / DPI Evasion to standard Web HTTP/HTTPS ports!
-						// BitTorrent and P2P protocols transfer arbitrary binary chunks that can false-positive
-						// as HTTP or TLS signatures. Splitting non-web traffic corrupts torrent data blocks!
-						if cfg.TcpSplit && proto == 6 && rawFd > 0 && len(payload) > ihl+20 {
-							dstPort := binary.BigEndian.Uint16(payload[ihl+2 : ihl+4])
-							isWebPort := (dstPort == 80 || dstPort == 443 || dstPort == 8080 || dstPort == 8443)
-
-							if isWebPort {
-								tcphl := int((payload[ihl+12]>>4)&0x0F) * 4
-								tcpPayload := payload[ihl+tcphl:]
-								if isTLSClientHello(tcpPayload) || isHTTPRequest(tcpPayload) {
-									if splitAndSendIPv4TCP(rawFd, payload, cfg.SplitPos) {
-										atomic.AddUint64(&tcpSplitPkts, 1)
-										atomic.AddUint64(&ttlModified, 1)
-										sendVerdict(fd, cfg.QueueNum, packetID, NF_DROP, nil)
-										offset += (msgLen + 3) & ^3
-										continue
-									}
-								}
-							}
-						}
-
-						currentTTL := payload[8]
-						if currentTTL != cfg.TargetTTL {
-							payload[8] = cfg.TargetTTL
-							payload[10] = 0
-							payload[11] = 0
-							newCsum := calcChecksum(payload[0:ihl])
-							binary.BigEndian.PutUint16(payload[10:12], newCsum)
-							atomic.AddUint64(&ttlModified, 1)
-							sendVerdict(fd, cfg.QueueNum, packetID, NF_ACCEPT, payload)
-						} else {
-							sendVerdict(fd, cfg.QueueNum, packetID, NF_ACCEPT, nil)
-						}
-					} else if version == 6 && len(payload) >= 40 {
-						atomic.AddUint64(&ipv6Packets, 1)
-						currentHL := payload[7]
-						if currentHL != cfg.TargetTTL {
-							payload[7] = cfg.TargetTTL
-							atomic.AddUint64(&ttlModified, 1)
-							sendVerdict(fd, cfg.QueueNum, packetID, NF_ACCEPT, payload)
-						} else {
-							sendVerdict(fd, cfg.QueueNum, packetID, NF_ACCEPT, nil)
-						}
-					} else {
-						sendVerdict(fd, cfg.QueueNum, packetID, NF_ACCEPT, nil)
-					}
+				if packetID != 0 {
+					handlePacket(fd, rawFd, cfg.QueueNum, packetID, payload)
 				}
 			}
 

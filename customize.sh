@@ -2,7 +2,7 @@ SKIPUNZIP=0
 
 ui_print "*****************************************"
 ui_print "*   GKI Hotspot Shield & TTL/DPI Fixer  *"
-ui_print "*                  v3.5                 *"
+ui_print "*                  v3.6                 *"
 ui_print "*             by alperozd               *"
 ui_print "*****************************************"
 

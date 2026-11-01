@@ -42,8 +42,8 @@ const (
 	DEFAULT_MODULE_DIR  = "/data/adb/modules/gki_hotspot_shield"
 	WEB_PORT            = 64640
 	DNS_PORT            = 53545
-	MODULE_VERSION      = "v3.5"
-	MODULE_VERSION_CODE = 350
+	MODULE_VERSION      = "v3.6"
+	MODULE_VERSION_CODE = 360
 )
 
 var (

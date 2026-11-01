@@ -11,12 +11,29 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 )
 
 //go:embed index.html
 var webUIHTML []byte
+
+// Set at build time from module.prop by scripts/build.sh
+// (-X main.moduleVersion=... -X main.moduleVersionCode=...).
+var (
+	moduleVersion     = "dev"
+	moduleVersionCode = "0"
+)
+
+// versionCode returns the numeric module version code (0 for dev builds).
+func versionCode() int {
+	code, err := strconv.Atoi(moduleVersionCode)
+	if err != nil {
+		return 0
+	}
+	return code
+}
 
 const (
 	NETLINK_NETFILTER = 12
@@ -42,11 +59,9 @@ const (
 	SOL_NETLINK        = 270
 	NETLINK_NO_ENOBUFS = 5
 
-	DEFAULT_MODULE_DIR  = "/data/adb/modules/gki_hotspot_shield"
-	WEB_PORT            = 64640
-	DNS_PORT            = 53545
-	MODULE_VERSION      = "v3.6"
-	MODULE_VERSION_CODE = 360
+	DEFAULT_MODULE_DIR = "/data/adb/modules/gki_hotspot_shield"
+	WEB_PORT           = 64640
+	DNS_PORT           = 53545
 )
 
 var (
@@ -111,7 +126,7 @@ func main() {
 	startHTTPServer()
 
 	logf("Starting %s (WebUI: %d, DoH DNS: %d, Target TTL: %d, TCP Split: %v)",
-		MODULE_VERSION, WEB_PORT, DNS_PORT, startCfg.TargetTTL, startCfg.TcpSplit)
+		moduleVersion, WEB_PORT, DNS_PORT, startCfg.TargetTTL, startCfg.TcpSplit)
 
 	rawFd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
 	if err == nil {

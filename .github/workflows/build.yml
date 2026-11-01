@@ -35,7 +35,7 @@ jobs:
           go test -race .
 
       - name: Build arm64 binary
-        run: GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o tether_shield .
+        run: sh scripts/build.sh
 
       - name: Package module ZIP
         run: |
@@ -93,7 +93,7 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o tether_shield .
+          sh scripts/build.sh
           sh scripts/package.sh "$VERSION" dist
           (cd dist && sha256sum *.zip > SHA256SUMS)
 

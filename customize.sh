@@ -1,9 +1,9 @@
 SKIPUNZIP=0
 
+VERSION="$(sed -n 's/^version=//p' "$MODPATH/module.prop" | head -n1)"
 ui_print "*****************************************"
-ui_print "*   GKI Hotspot Shield & TTL/DPI Fixer  *"
-ui_print "*                  v3.6                 *"
-ui_print "*             by alperozd               *"
+ui_print "*   GKI Tether Shield & TTL/DPI Fixer   *"
+ui_print "*   ${VERSION:-unknown} by maozdemir"
 ui_print "*****************************************"
 
 ui_print "- Setting up permissions..."

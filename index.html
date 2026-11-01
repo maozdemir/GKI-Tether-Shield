@@ -84,7 +84,7 @@
         <span>🛡️ GKI Tether Shield</span>
       </div>
       <div class="header-badges">
-        <span class="version-badge" id="appVersion">v3.6</span>
+        <span class="version-badge" id="appVersion"></span>
         <div class="badge" id="statusBadge">● Active</div>
       </div>
     </header>
@@ -241,7 +241,8 @@
       }
     })();
 
-    let currentVersionCode = 360;
+    // Filled from /api/stats (the daemon reports module.prop's version).
+    let currentVersionCode = 0;
 
     function showToast(msg) {
       const toast = document.getElementById('toast');
@@ -350,10 +351,11 @@
     }
 
     loadConfig();
-    fetchStats();
-    checkForUpdates();
+    // Check for updates only once the running version is known, so a slow
+    // daemon response can't make the current release look outdated.
+    fetchStats().then(() => { if (currentVersionCode > 0) checkForUpdates(); });
     setInterval(fetchStats, 2000);
-    setInterval(checkForUpdates, 60000);
+    setInterval(() => { if (currentVersionCode > 0) checkForUpdates(); }, 60000);
   </script>
 </body>
 </html>

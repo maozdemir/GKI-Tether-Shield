@@ -162,8 +162,8 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 		"tcp_split_enabled": c.TcpSplit,
 		"doh_enabled":       c.DohEnabled,
 		"doh_provider":      c.DohProvider,
-		"version":           MODULE_VERSION,
-		"version_code":      MODULE_VERSION_CODE,
+		"version":           moduleVersion,
+		"version_code":      versionCode(),
 		"updated_at":        time.Now().Format(time.RFC3339),
 	}
 	_ = json.NewEncoder(w).Encode(stats)

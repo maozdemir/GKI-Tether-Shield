@@ -27,7 +27,7 @@ case "$(json zipUrl)" in
     *) fail "update.json zipUrl does not point at the $VERSION release asset" ;;
 esac
 
-grep -q "MODULE_VERSION *= \"$VERSION\"" "$ROOT/main.go" || fail "main.go MODULE_VERSION != $VERSION"
-grep -q "MODULE_VERSION_CODE *= $CODE\$" "$ROOT/main.go" || fail "main.go MODULE_VERSION_CODE != $CODE"
+# The daemon, WebUI and installer read the version from module.prop
+# (scripts/build.sh injects it), so update.json is the only other copy.
 
 echo "version $VERSION ($CODE) is consistent"

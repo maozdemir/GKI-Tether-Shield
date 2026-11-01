@@ -286,11 +286,7 @@ All Generic Kernel Image (GKI) kernels (5.4, 5.10, 5.15, 6.1, 6.6, 6.12+) runnin
 
 ### Compiling Daemon
 ```bash
-# Windows PowerShell
-$env:GOOS="linux"; $env:GOARCH="arm64"; go build -trimpath -ldflags="-s -w" -o tether_shield .
-
-# Linux / macOS
-GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o tether_shield .
+sh scripts/build.sh   # arm64 binary ./tether_shield, version taken from module.prop
 ```
 
 ### Testing
@@ -308,9 +304,9 @@ Every push and pull request builds and tests; the module ZIP is attached to
 the workflow run as an artifact. A push to `main` also publishes a release
 when `module.prop` carries a version that has no release yet:
 
-1. Bump `version` / `versionCode` in `module.prop`, `MODULE_VERSION` /
-   `MODULE_VERSION_CODE` in `main.go`, and `update.json`; add a `changelog.md`
-   entry. `sh scripts/check-version.sh` verifies they agree.
+1. Bump `version` / `versionCode` in `module.prop` and `update.json`, and add
+   a `changelog.md` entry. `sh scripts/check-version.sh` verifies they agree;
+   the daemon, WebUI and installer read the version from `module.prop`.
 2. Merge to `main`. The workflow tags that commit and publishes the release.
 
 Pushes that don't change the version build and test only; an existing

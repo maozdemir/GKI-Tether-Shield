@@ -39,6 +39,11 @@ jobs:
           go vet .
           go test -race .
 
+      - name: eBPF tests (root)
+        # Loads the TTL program into the runner's kernel (BPF_PROG_TEST_RUN)
+        # and attaches it with tc in throwaway network namespaces.
+        run: sudo -E env "PATH=$PATH" go test -race -count=1 -run 'EBPF|TTLEngine' -v .
+
       - name: Set up JDK
         uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:

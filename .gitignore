@@ -3,3 +3,8 @@
 /dist/
 *.test
 /HotspotShieldManager.apk
+
+# Design-tool artifacts (impeccable); never committed
+/PRODUCT.md
+/DESIGN.md
+/.impeccable/

@@ -67,7 +67,7 @@ func TestIsWebSplitCandidate(t *testing.T) {
 func TestSplitAndSendRejectsMalformedHeaders(t *testing.T) {
 	// A TCP data offset below 20 bytes must not cause out-of-range writes.
 	pkt := buildIPv4TCP(0, 443, clientHello)
-	if splitAndSendIPv4TCP(-1, pkt, 2) {
+	if splitAndSendIPv4TCP(-1, pkt, 2, 64) {
 		t.Fatal("expected malformed packet to be rejected")
 	}
 }
@@ -79,7 +79,7 @@ func FuzzIsWebSplitCandidate(f *testing.F) {
 	f.Fuzz(func(t *testing.T, pkt []byte) {
 		if isWebSplitCandidate(pkt) {
 			// Anything accepted must be safe to split.
-			_ = splitAndSendIPv4TCP(-1, pkt, 2)
+			_ = splitAndSendIPv4TCP(-1, pkt, 2, 64)
 		}
 	})
 }

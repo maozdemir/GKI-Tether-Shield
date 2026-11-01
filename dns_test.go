@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -56,9 +57,7 @@ func withPlainUpstream(t *testing.T, addr string) {
 
 func withDoHEnabled(t *testing.T, enabled bool) {
 	t.Helper()
-	orig := cfg.DohEnabled
-	cfg.DohEnabled = enabled
-	t.Cleanup(func() { cfg.DohEnabled = orig })
+	withConfig(t, func(c *Config) { c.DohEnabled = enabled })
 }
 
 func TestResolveDNSUsesPlainUpstreamWhenDoHDisabled(t *testing.T) {
@@ -124,5 +123,57 @@ func TestTryAcquireDNSWorkerIsBounded(t *testing.T) {
 	<-sem
 	if !tryAcquire(sem) {
 		t.Fatal("slot must be reusable after release")
+	}
+}
+
+// TestDNSProxyAnswersOverIPv4AndIPv6 runs the real listeners and resolves a
+// query over UDP and TCP on both 127.0.0.1 and ::1 (plain upstream mode).
+func TestDNSProxyAnswersOverIPv4AndIPv6(t *testing.T) {
+	withDoHEnabled(t, false)
+	withPlainUpstream(t, startFakeUpstream(t, func(q []byte) [][]byte { return [][]byte{answerFor(q)} }))
+
+	pc, l, err := listenDNS(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	defer l.Close()
+	go serveDNSUDP(pc)
+	go serveDNSTCP(l)
+	port := pc.LocalAddr().(*net.UDPAddr).Port
+
+	for _, host := range []string{"127.0.0.1", "::1"} {
+		addr := net.JoinHostPort(host, strconv.Itoa(port))
+
+		udp, err := net.DialTimeout("udp", addr, time.Second)
+		if err != nil {
+			t.Fatalf("dial udp %s: %v", addr, err)
+		}
+		_ = udp.SetDeadline(time.Now().Add(2 * time.Second))
+		_, _ = udp.Write(dnsQuery(0x0a0b))
+		buf := make([]byte, 512)
+		n, err := udp.Read(buf)
+		udp.Close()
+		if err != nil || n < 12 || binary.BigEndian.Uint16(buf[:2]) != 0x0a0b {
+			t.Fatalf("UDP over %s: n=%d err=%v", host, n, err)
+		}
+
+		tcp, err := net.DialTimeout("tcp", addr, time.Second)
+		if err != nil {
+			t.Fatalf("dial tcp %s: %v", addr, err)
+		}
+		_ = tcp.SetDeadline(time.Now().Add(2 * time.Second))
+		q := dnsQuery(0x0c0d)
+		_, _ = tcp.Write(append(binary.BigEndian.AppendUint16(nil, uint16(len(q))), q...))
+		var lenBuf [2]byte
+		if _, err := io.ReadFull(tcp, lenBuf[:]); err != nil {
+			t.Fatalf("TCP over %s: %v", host, err)
+		}
+		resp := make([]byte, binary.BigEndian.Uint16(lenBuf[:]))
+		_, err = io.ReadFull(tcp, resp)
+		tcp.Close()
+		if err != nil || binary.BigEndian.Uint16(resp[:2]) != 0x0c0d {
+			t.Fatalf("TCP over %s: bad response %v", host, err)
+		}
 	}
 }

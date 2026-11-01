@@ -20,11 +20,20 @@ if pm list packages 2>/dev/null | grep -q "com.alperozd.hotspotshield"; then
     exit 0
 fi
 
-# 4. Fallback: launch default web browser if companion app is not installed
+# 4. Fallback: launch the default web browser if the companion app is missing
 URL="http://127.0.0.1:64640"
 BROWSER=$(pm resolve-activity -a android.intent.action.VIEW -d "$URL" 2>/dev/null | grep packageName | head -n1 | cut -d'=' -f2)
 
 if [ -n "$BROWSER" ]; then
+    # Saving needs the daemon's per-boot token (only the companion app is
+    # trusted by UID). It is only ever sent pinned to the resolved browser
+    # (-p), never as an open intent another app could receive, and the URL
+    # fragment never leaves the browser.
+    TOKEN=""
+    [ -r "$MODDIR/.webui_token" ] && read -r TOKEN < "$MODDIR/.webui_token"
+    [ -n "$TOKEN" ] && URL="$URL/#token=$TOKEN"
     am start -a android.intent.action.VIEW -d "$URL" -p "$BROWSER" --user 0 -f 0x14000000 >/dev/null 2>&1
+else
+    # No resolvable browser: open the read-only dashboard without a token.
+    am start -a android.intent.action.VIEW -d "$URL" --user 0 -f 0x14000000 >/dev/null 2>&1
 fi
-am start -a android.intent.action.VIEW -d "$URL" --user 0 -f 0x14000000 >/dev/null 2>&1

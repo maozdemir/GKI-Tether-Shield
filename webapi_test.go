@@ -63,7 +63,7 @@ func TestApplyConfigUpdate(t *testing.T) {
 
 func TestConfigHandlerRejectsCrossSiteAndNonJSON(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.conf")
-	h := configHandler(func() string { return path })
+	h := configHandler(func() string { return path }, func(*http.Request) bool { return true })
 
 	post := func(contentType, origin, body string) int {
 		r := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(body))
@@ -102,16 +102,27 @@ func TestConfigHandlerRejectsCrossSiteAndNonJSON(t *testing.T) {
 	}
 }
 
-func TestLoadConfigIgnoresUnknownProvider(t *testing.T) {
+func TestConfigHandlerRejectsUntrustedWriters(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.conf")
-	if err := os.WriteFile(path, []byte("DOH_PROVIDER=evil.example\n"), 0o600); err != nil {
-		t.Fatal(err)
+	h := configHandler(func() string { return path }, func(*http.Request) bool { return false })
+
+	post := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(`{"DOH_ENABLED":"0"}`))
+	post.Host = "127.0.0.1:64640"
+	post.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h(w, post)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("untrusted POST got %d, want 403", w.Code)
 	}
-	original := cfg
-	defer func() { cfg = original }()
-	cfg.DohProvider = "cloudflare"
-	loadConfig(path)
-	if cfg.DohProvider != "cloudflare" {
-		t.Fatalf("unknown provider was loaded: %q", cfg.DohProvider)
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("rejected write must not touch the config file")
+	}
+
+	get := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	get.Host = "127.0.0.1:64640"
+	w = httptest.NewRecorder()
+	h(w, get)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET got %d, want 200 (reads are not UID-restricted)", w.Code)
 	}
 }

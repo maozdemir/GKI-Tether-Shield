@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"mime"
 	"net/http"
-	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -109,28 +108,37 @@ func handleConfigPost(w http.ResponseWriter, r *http.Request, configPath func() 
 		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	next, err := applyConfigUpdate(cfg, update)
+	cfgWriteMu.Lock()
+	defer cfgWriteMu.Unlock()
+	next, err := applyConfigUpdate(*cfgSnapshot(), update)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := saveConfigToFile(configPath(), next); err != nil {
-		fmt.Fprintf(os.Stderr, "save config: %v\n", err)
+		logf("save config: %v", err)
 		writeJSONError(w, http.StatusInternalServerError, "failed to save config")
 		return
 	}
-	cfg = next
+	setCfg(next)
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
-func configHandler(configPath func() string) http.HandlerFunc {
+// configHandler serves GET/POST /api/config. canWrite decides whether the
+// caller may change settings (see auth.go); reads only need the Host/Origin
+// checks of requireTrustedLocal.
+func configHandler(configPath func() string, canWrite func(*http.Request) bool) http.HandlerFunc {
 	return requireTrustedLocal(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(cfg)
+			_ = json.NewEncoder(w).Encode(cfgSnapshot())
 		case http.MethodPost:
+			if !canWrite(r) {
+				writeJSONError(w, http.StatusForbidden, "settings can only be changed from the Hotspot Shield app")
+				return
+			}
 			handleConfigPost(w, r, configPath)
 		default:
 			w.Header().Set("Allow", "GET, POST")
@@ -141,6 +149,7 @@ func configHandler(configPath func() string) http.HandlerFunc {
 
 func statsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	c := cfgSnapshot()
 	stats := map[string]any{
 		"total_packets":     atomic.LoadUint64(&totalPackets),
 		"ipv4_packets":      atomic.LoadUint64(&ipv4Packets),
@@ -149,12 +158,12 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 		"tcp_split_packets": atomic.LoadUint64(&tcpSplitPkts),
 		"doh_queries":       atomic.LoadUint64(&dohQueries),
 		"dns_cache_hits":    atomic.LoadUint64(&dnsCacheHits),
-		"target_ttl":        cfg.TargetTTL,
-		"tcp_split_enabled": cfg.TcpSplit,
-		"doh_enabled":       cfg.DohEnabled,
-		"doh_provider":      cfg.DohProvider,
-		"version":           MODULE_VERSION,
-		"version_code":      MODULE_VERSION_CODE,
+		"target_ttl":        c.TargetTTL,
+		"tcp_split_enabled": c.TcpSplit,
+		"doh_enabled":       c.DohEnabled,
+		"doh_provider":      c.DohProvider,
+		"version":           moduleVersion,
+		"version_code":      versionCode(),
 		"updated_at":        time.Now().Format(time.RFC3339),
 	}
 	_ = json.NewEncoder(w).Encode(stats)
@@ -170,10 +179,17 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func startHTTPServer() {
+	token, err := createWebUIToken()
+	if err != nil {
+		// Without a token only UID-authorized callers (the app) can save.
+		logf("web UI token: %v", err)
+	}
+	auth := newWriteAuthorizer(token)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", requireTrustedLocal(indexHandler))
 	mux.HandleFunc("/api/stats", requireTrustedLocal(statsHandler))
-	mux.HandleFunc("/api/config", configHandler(getConfigPath))
+	mux.HandleFunc("/api/config", configHandler(getConfigPath, auth.allowed))
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", WEB_PORT),
@@ -186,7 +202,7 @@ func startHTTPServer() {
 	}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil {
-			fmt.Fprintf(os.Stderr, "web UI server stopped: %v\n", err)
+			logf("web UI server stopped: %v", err)
 		}
 	}()
 }

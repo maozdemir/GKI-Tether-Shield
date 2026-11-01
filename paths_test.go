@@ -14,7 +14,6 @@ func TestRuntimePathsLiveInModuleDir(t *testing.T) {
 	for name, p := range map[string]string{
 		"config":  getConfigPath(),
 		"webroot": getWebrootFile(),
-		"stats":   getStatsPath(),
 	} {
 		if !strings.HasPrefix(p, dir+string(filepath.Separator)) {
 			t.Errorf("%s path %q is outside the module dir %q", name, p, dir)

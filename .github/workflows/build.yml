@@ -24,7 +24,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
 
       - name: Check version consistency
         run: sh scripts/check-version.sh
@@ -35,7 +35,7 @@ jobs:
           go test -race .
 
       - name: Build arm64 binary
-        run: GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o tether_shield .
+        run: sh scripts/build.sh
 
       - name: Package module ZIP
         run: |
@@ -86,14 +86,14 @@ jobs:
         if: steps.version.outputs.publish == 'true'
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
 
       - name: Build and package
         if: steps.version.outputs.publish == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o tether_shield .
+          sh scripts/build.sh
           sh scripts/package.sh "$VERSION" dist
           (cd dist && sha256sum *.zip > SHA256SUMS)
 

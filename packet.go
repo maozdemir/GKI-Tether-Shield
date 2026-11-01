@@ -4,8 +4,6 @@ package main
 
 import (
 	"encoding/binary"
-	"fmt"
-	"os"
 	"sync/atomic"
 	"syscall"
 )
@@ -116,7 +114,7 @@ func isWebSplitCandidate(payload []byte) bool {
 	return isTLSClientHello(tcpPayload) || isHTTPRequest(tcpPayload)
 }
 
-func splitAndSendIPv4TCP(rawFd int, payload []byte, splitPos int) bool {
+func splitAndSendIPv4TCP(rawFd int, payload []byte, splitPos int, ttl uint8) bool {
 	ihl, tcphl, ok := ipv4TCPHeaderLens(payload)
 	if !ok {
 		return false
@@ -138,7 +136,7 @@ func splitAndSendIPv4TCP(rawFd int, payload []byte, splitPos int) bool {
 	copy(pkt1, payload[:headerLen+splitPos])
 
 	binary.BigEndian.PutUint16(pkt1[2:4], uint16(len(pkt1)))
-	pkt1[8] = cfg.TargetTTL
+	pkt1[8] = ttl
 	pkt1[10], pkt1[11] = 0, 0
 	binary.BigEndian.PutUint16(pkt1[10:12], calcChecksum(pkt1[:ihl]))
 
@@ -153,7 +151,7 @@ func splitAndSendIPv4TCP(rawFd int, payload []byte, splitPos int) bool {
 
 	binary.BigEndian.PutUint32(pkt2[ihl+4:ihl+8], origSeq+uint32(splitPos))
 	binary.BigEndian.PutUint16(pkt2[2:4], uint16(len(pkt2)))
-	pkt2[8] = cfg.TargetTTL
+	pkt2[8] = ttl
 	pkt2[10], pkt2[11] = 0, 0
 	binary.BigEndian.PutUint16(pkt2[10:12], calcChecksum(pkt2[:ihl]))
 
@@ -190,7 +188,7 @@ func handlePacket(fd, rawFd int, qNum uint16, packetID uint32, payload []byte) {
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "packet %d: recovered from panic: %v\n", packetID, r)
+			packetLogf("packet %d: recovered from panic: %v", packetID, r)
 			if !verdictSent {
 				_ = sendVerdict(fd, qNum, packetID, NF_ACCEPT, nil)
 			}
@@ -202,13 +200,14 @@ func handlePacket(fd, rawFd int, qNum uint16, packetID uint32, payload []byte) {
 		return
 	}
 
+	c := cfgSnapshot() // one consistent config view per packet
 	switch version := payload[0] >> 4; {
 	case version == 4 && len(payload) >= ipv4MinHeaderLen:
-		handleIPv4(payload, rawFd, verdict)
+		handleIPv4(payload, rawFd, c, verdict)
 	case version == 6 && len(payload) >= 40:
 		atomic.AddUint64(&ipv6Packets, 1)
-		if payload[7] != cfg.TargetTTL {
-			payload[7] = cfg.TargetTTL
+		if payload[7] != c.TargetTTL {
+			payload[7] = c.TargetTTL
 			atomic.AddUint64(&ttlModified, 1)
 			verdict(NF_ACCEPT, payload)
 			return
@@ -219,11 +218,11 @@ func handlePacket(fd, rawFd int, qNum uint16, packetID uint32, payload []byte) {
 	}
 }
 
-func handleIPv4(payload []byte, rawFd int, verdict func(uint32, []byte)) {
+func handleIPv4(payload []byte, rawFd int, c *Config, verdict func(uint32, []byte)) {
 	atomic.AddUint64(&ipv4Packets, 1)
 
-	if cfg.TcpSplit && rawFd > 0 && isWebSplitCandidate(payload) &&
-		splitAndSendIPv4TCP(rawFd, payload, cfg.SplitPos) {
+	if c.TcpSplit && rawFd > 0 && isWebSplitCandidate(payload) &&
+		splitAndSendIPv4TCP(rawFd, payload, c.SplitPos, c.TargetTTL) {
 		atomic.AddUint64(&tcpSplitPkts, 1)
 		atomic.AddUint64(&ttlModified, 1)
 		verdict(NF_DROP, nil)
@@ -231,11 +230,11 @@ func handleIPv4(payload []byte, rawFd int, verdict func(uint32, []byte)) {
 	}
 
 	ihl := int(payload[0]&0x0F) * 4
-	if ihl < ipv4MinHeaderLen || ihl > len(payload) || payload[8] == cfg.TargetTTL {
+	if ihl < ipv4MinHeaderLen || ihl > len(payload) || payload[8] == c.TargetTTL {
 		verdict(NF_ACCEPT, nil)
 		return
 	}
-	payload[8] = cfg.TargetTTL
+	payload[8] = c.TargetTTL
 	payload[10], payload[11] = 0, 0
 	binary.BigEndian.PutUint16(payload[10:12], calcChecksum(payload[:ihl]))
 	atomic.AddUint64(&ttlModified, 1)

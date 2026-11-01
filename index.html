@@ -84,7 +84,7 @@
         <span>🛡️ GKI Tether Shield</span>
       </div>
       <div class="header-badges">
-        <span class="version-badge" id="appVersion">v3.6</span>
+        <span class="version-badge" id="appVersion"></span>
         <div class="badge" id="statusBadge">● Active</div>
       </div>
     </header>
@@ -225,7 +225,24 @@
   <div class="toast" id="toast">Settings Saved!</div>
 
   <script>
-    let currentVersionCode = 360;
+    // Browser fallback: action.sh opens this page with #token=... (fragments
+    // are never sent to servers). Keep it for this tab only and strip it from
+    // the address bar; the companion app is authorized by its UID instead.
+    const SHIELD_TOKEN = (() => {
+      try {
+        const match = location.hash.match(/token=([0-9a-f]+)/);
+        if (match) {
+          sessionStorage.setItem('shieldToken', match[1]);
+          history.replaceState(null, '', location.pathname);
+        }
+        return sessionStorage.getItem('shieldToken') || '';
+      } catch (e) {
+        return '';
+      }
+    })();
+
+    // Filled from /api/stats (the daemon reports module.prop's version).
+    let currentVersionCode = 0;
 
     function showToast(msg) {
       const toast = document.getElementById('toast');
@@ -234,14 +251,29 @@
       setTimeout(() => toast.classList.remove('show'), 2000);
     }
 
+    const RELEASES_PREFIX = 'https://github.com/maozdemir/GKI-Tether-Shield/releases/';
+
+    function isTrustedReleaseUrl(value) {
+      if (typeof value !== 'string') return false;
+      try {
+        const url = new URL(value);
+        return url.protocol === 'https:' && url.href.startsWith(RELEASES_PREFIX);
+      } catch (e) {
+        return false;
+      }
+    }
+
     async function checkForUpdates() {
       try {
         const res = await fetch('https://raw.githubusercontent.com/maozdemir/GKI-Tether-Shield/main/update.json?t=' + Date.now());
         if (res.ok) {
           const remote = await res.json();
-          if (remote.versionCode && remote.versionCode > currentVersionCode) {
-            document.getElementById('updateVersionTag').innerText = remote.version;
-            if (remote.zipUrl) {
+          if (Number.isInteger(remote.versionCode) && remote.versionCode > currentVersionCode &&
+              typeof remote.version === 'string' && /^v[0-9][0-9A-Za-z.\-]*$/.test(remote.version)) {
+            document.getElementById('updateVersionTag').textContent = remote.version;
+            // Only ever link to this repo's release assets: a tampered
+            // update.json must not inject e.g. a javascript: URL here.
+            if (isTrustedReleaseUrl(remote.zipUrl)) {
               document.getElementById('updateDownloadBtn').href = remote.zipUrl;
             }
             document.getElementById('updateCard').style.display = 'flex';
@@ -301,11 +333,15 @@
       try {
         const res = await fetch('/api/config', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: SHIELD_TOKEN
+            ? { 'Content-Type': 'application/json', 'X-Shield-Token': SHIELD_TOKEN }
+            : { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
         });
         if (res.ok) {
           showToast('✅ Settings applied and DoH reloaded!');
+        } else if (res.status === 403) {
+          showToast('🔒 Open from the Magisk/KernelSU action to change settings');
         } else {
           showToast('❌ Failed to save settings');
         }
@@ -315,10 +351,16 @@
     }
 
     loadConfig();
-    fetchStats();
-    checkForUpdates();
-    setInterval(fetchStats, 2000);
-    setInterval(checkForUpdates, 60000);
+    // Check for updates only once the running version is known, so a slow
+    // daemon response can't make the current release look outdated.
+    fetchStats().then(() => { if (currentVersionCode > 0) checkForUpdates(); });
+    // Don't poll while the page is hidden (background tab, screen off);
+    // refresh immediately when it becomes visible again.
+    setInterval(() => { if (!document.hidden) fetchStats(); }, 2000);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) fetchStats();
+    });
+    setInterval(() => { if (currentVersionCode > 0) checkForUpdates(); }, 60000);
   </script>
 </body>
 </html>

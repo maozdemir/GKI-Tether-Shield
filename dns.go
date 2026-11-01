@@ -14,26 +14,10 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 )
 
-type dnsCacheEntry struct {
-	response  []byte
-	expiresAt time.Time
-}
-
-var (
-	dnsCache   = make(map[string]dnsCacheEntry)
-	dnsCacheMu sync.RWMutex
-)
-
-const (
-	dohMaxResponseBytes = 64 * 1024
-	dnsCacheTTL         = 60 * time.Second
-	dnsCacheMaxEntries  = 10000
-)
+const dohMaxResponseBytes = 64 * 1024
 
 // dohProvider describes a DoH resolver. The URL uses the provider's real
 // hostname so TLS certificates are verified against it; the connection is
@@ -107,32 +91,10 @@ func configureAndroidCertDirs() {
 }
 
 func currentDoHProvider() dohProvider {
-	if p, ok := lookupDoHProvider(cfg.DohProvider); ok {
+	if p, ok := lookupDoHProvider(cfgSnapshot().DohProvider); ok {
 		return p
 	}
 	return dohProviders[defaultDoHProvider]
-}
-
-func lookupDNSCache(queryKey string, query []byte) ([]byte, bool) {
-	dnsCacheMu.RLock()
-	entry, ok := dnsCache[queryKey]
-	dnsCacheMu.RUnlock()
-	if !ok || !time.Now().Before(entry.expiresAt) {
-		return nil, false
-	}
-	resp := make([]byte, len(entry.response))
-	copy(resp, entry.response)
-	resp[0], resp[1] = query[0], query[1] // restore the caller's transaction ID
-	return resp, true
-}
-
-func storeDNSCache(queryKey string, resp []byte) {
-	dnsCacheMu.Lock()
-	defer dnsCacheMu.Unlock()
-	if len(dnsCache) > dnsCacheMaxEntries {
-		dnsCache = make(map[string]dnsCacheEntry)
-	}
-	dnsCache[queryKey] = dnsCacheEntry{response: resp, expiresAt: time.Now().Add(dnsCacheTTL)}
 }
 
 func queryDoH(query []byte) ([]byte, error) {
@@ -198,32 +160,11 @@ func resolvePlainUDP(query []byte) ([]byte, error) {
 	}
 }
 
-func resolveDoH(query []byte) ([]byte, error) {
-	if len(query) < 12 {
-		return nil, fmt.Errorf("query too short")
-	}
-
-	queryKey := string(query[2:])
-	if resp, ok := lookupDNSCache(queryKey, query); ok {
-		atomic.AddUint64(&dnsCacheHits, 1)
-		return resp, nil
-	}
-
-	resp, err := queryDoH(query)
-	if err != nil {
-		// Fallback to plain DNS if DoH failed
-		return resolvePlainUDP(query)
-	}
-	atomic.AddUint64(&dohQueries, 1)
-	storeDNSCache(queryKey, resp)
-	return resp, nil
-}
-
 // resolveDNS answers a redirected client query. iptables keeps redirecting
 // port 53 here even when DoH is switched off, so queries must still be
 // answered (in plain DNS) rather than dropped.
 func resolveDNS(query []byte) ([]byte, error) {
-	if cfg.DohEnabled {
+	if cfgSnapshot().DohEnabled {
 		return resolveDoH(query)
 	}
 	return resolvePlainUDP(query)
@@ -317,18 +258,30 @@ func serveDNSTCP(l net.Listener) {
 	}
 }
 
-// startDNSServer listens on all IPv4 interfaces so REDIRECTed tether
-// clients can reach it; service.sh drops port DNS_PORT on WAN interfaces.
+// listenDNS opens dual-stack (IPv4 + IPv6) UDP and TCP listeners on port,
+// so tether clients querying over either family reach the proxy. service.sh
+// only accepts this port from loopback and downstream interfaces (iptables
+// and ip6tables), so no modem interface can reach it.
+func listenDNS(port int) (net.PacketConn, net.Listener, error) {
+	addr := fmt.Sprintf(":%d", port)
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("DNS UDP listen on %s: %w", addr, err)
+	}
+	l, err := net.Listen("tcp", fmt.Sprintf(":%d", pc.LocalAddr().(*net.UDPAddr).Port))
+	if err != nil {
+		pc.Close()
+		return nil, nil, fmt.Errorf("DNS TCP listen on %s: %w", addr, err)
+	}
+	return pc, l, nil
+}
+
 func startDNSServer() {
-	addr := fmt.Sprintf("0.0.0.0:%d", DNS_PORT)
-	if conn, err := net.ListenPacket("udp4", addr); err != nil {
-		fmt.Fprintf(os.Stderr, "DNS UDP listen on %s: %v\n", addr, err)
-	} else {
-		go serveDNSUDP(conn)
+	pc, l, err := listenDNS(DNS_PORT)
+	if err != nil {
+		logf("%v", err)
+		return
 	}
-	if l, err := net.Listen("tcp4", addr); err != nil {
-		fmt.Fprintf(os.Stderr, "DNS TCP listen on %s: %v\n", addr, err)
-	} else {
-		go serveDNSTCP(l)
-	}
+	go serveDNSUDP(pc)
+	go serveDNSTCP(l)
 }

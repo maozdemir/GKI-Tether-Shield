@@ -5,7 +5,6 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
-	"os"
 	"sync/atomic"
 	"syscall"
 )
@@ -149,7 +148,7 @@ func (q *queueWorker) configure() error {
 	// Without fail-open a full queue drops packets, so a burst the daemon
 	// can't keep up with stalls every tethered connection.
 	if err := sendQueueFlags(q.fd, q.qNum, NFQA_CFG_F_FAIL_OPEN, NFQA_CFG_F_FAIL_OPEN); err != nil {
-		fmt.Fprintf(os.Stderr, "queue %d: enabling fail-open failed (continuing): %v\n", q.qNum, err)
+		logf("queue %d: enabling fail-open failed (continuing): %v", q.qNum, err)
 	}
 	return nil
 }

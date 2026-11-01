@@ -3,17 +3,37 @@
 package main
 
 import (
+	"bytes"
 	_ "embed"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/signal"
-	"sync/atomic"
+	"strconv"
 	"syscall"
 	"time"
 )
 
 //go:embed index.html
 var webUIHTML []byte
+
+// Set at build time from module.prop by scripts/build.sh
+// (-X main.moduleVersion=... -X main.moduleVersionCode=...).
+var (
+	moduleVersion     = "dev"
+	moduleVersionCode = "0"
+)
+
+// versionCode returns the numeric module version code (0 for dev builds).
+func versionCode() int {
+	code, err := strconv.Atoi(moduleVersionCode)
+	if err != nil {
+		return 0
+	}
+	return code
+}
 
 const (
 	NETLINK_NETFILTER = 12
@@ -39,11 +59,9 @@ const (
 	SOL_NETLINK        = 270
 	NETLINK_NO_ENOBUFS = 5
 
-	DEFAULT_MODULE_DIR  = "/data/adb/modules/gki_hotspot_shield"
-	WEB_PORT            = 64640
-	DNS_PORT            = 53545
-	MODULE_VERSION      = "v3.6"
-	MODULE_VERSION_CODE = 360
+	DEFAULT_MODULE_DIR = "/data/adb/modules/gki_hotspot_shield"
+	WEB_PORT           = 64640
+	DNS_PORT           = 53545
 )
 
 var (
@@ -56,54 +74,50 @@ var (
 	dnsCacheHits uint64
 )
 
-func writeStats() {
-	jsonContent := fmt.Sprintf(`{
-  "total_packets": %d,
-  "ipv4_packets": %d,
-  "ipv6_packets": %d,
-  "ttl_modified": %d,
-  "tcp_split_packets": %d,
-  "doh_queries": %d,
-  "dns_cache_hits": %d,
-  "target_ttl": %d,
-  "tcp_split_enabled": %v,
-  "doh_enabled": %v,
-  "doh_provider": "%s",
-  "updated_at": "%s"
-}`,
-		atomic.LoadUint64(&totalPackets),
-		atomic.LoadUint64(&ipv4Packets),
-		atomic.LoadUint64(&ipv6Packets),
-		atomic.LoadUint64(&ttlModified),
-		atomic.LoadUint64(&tcpSplitPkts),
-		atomic.LoadUint64(&dohQueries),
-		atomic.LoadUint64(&dnsCacheHits),
-		cfg.TargetTTL,
-		cfg.TcpSplit,
-		cfg.DohEnabled,
-		cfg.DohProvider,
-		time.Now().Format(time.RFC3339),
-	)
-	if err := writeFileAtomic(getStatsPath(), []byte(jsonContent), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "write stats: %v\n", err)
+// fetchStatus queries the running daemon's stats API and returns them
+// pretty-printed. The CLI runs as root, which the API trusts.
+func fetchStatus(url string) (string, error) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("daemon not reachable: %w", err)
 	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("daemon returned HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return "", fmt.Errorf("read status: %w", err)
+	}
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, body, "", "  "); err != nil {
+		return "", fmt.Errorf("decode status: %w", err)
+	}
+	return pretty.String(), nil
+}
+
+func runStatusCommand() {
+	out, err := fetchStatus(fmt.Sprintf("http://127.0.0.1:%d/api/stats", WEB_PORT))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v (is the daemon running?)\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(out)
 }
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "status" || os.Args[1] == "-status" || os.Args[1] == "--status") {
-		data, err := os.ReadFile(getStatsPath())
-		if err != nil {
-			fmt.Println("No stats available. Is the daemon running?")
-			os.Exit(1)
-		}
-		fmt.Println(string(data))
-		os.Exit(0)
+		runStatusCommand()
+		return
 	}
 
 	_ = syscall.Setpriority(syscall.PRIO_PROCESS, 0, -20)
 
+	initLogging()
 	configureAndroidCertDirs()
-	loadConfig(getConfigPath())
+	setCfg(loadConfigFile(getConfigPath(), defaultConfig))
+	startCfg := cfgSnapshot()
 
 	// Start embedded DoH DNS Interceptor
 	startDNSServer()
@@ -111,8 +125,8 @@ func main() {
 	// Start embedded HTTP WebUI Config Server
 	startHTTPServer()
 
-	fmt.Printf("Starting GKI Hotspot Shield (WebUI: %d, DoH DNS: %d, Target TTL: %d, TCP Split: %v)...\n",
-		WEB_PORT, DNS_PORT, cfg.TargetTTL, cfg.TcpSplit)
+	logf("Starting %s (WebUI: %d, DoH DNS: %d, Target TTL: %d, TCP Split: %v)",
+		moduleVersion, WEB_PORT, DNS_PORT, startCfg.TargetTTL, startCfg.TcpSplit)
 
 	rawFd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
 	if err == nil {
@@ -120,27 +134,25 @@ func main() {
 		defer syscall.Close(rawFd)
 	}
 
-	queues, err := openQueues(cfg.QueueNum, NUM_QUEUES)
+	queues, err := openQueues(startCfg.QueueNum, NUM_QUEUES)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "NFQUEUE setup failed: %v\n", err)
+		logf("NFQUEUE setup failed: %v", err)
 		os.Exit(1)
 	}
-	fmt.Printf("NFQUEUE initialized on queues %d-%d. Running...\n", cfg.QueueNum, cfg.QueueNum+NUM_QUEUES-1)
+	logf("NFQUEUE initialized on queues %d-%d", startCfg.QueueNum, startCfg.QueueNum+NUM_QUEUES-1)
 
-	ticker := time.NewTicker(3 * time.Second)
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
-		for range ticker.C {
-			writeStats()
+		for sig := range sigs {
+			if sig == syscall.SIGHUP {
+				// service.sh sends SIGHUP when config.conf changed on disk.
+				reloadConfig()
+				continue
+			}
+			closeQueues(queues)
+			os.Exit(0)
 		}
-	}()
-
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-c
-		writeStats()
-		closeQueues(queues)
-		os.Exit(0)
 	}()
 
 	errs := make(chan error, len(queues))
@@ -148,8 +160,8 @@ func main() {
 		go func(q *queueWorker) { errs <- q.run(rawFd) }(q)
 	}
 	// Any queue dying means its share of traffic bypasses TTL fixing, so exit
-	// and let the supervisor restart the daemon with all queues bound.
-	fmt.Fprintf(os.Stderr, "%v\n", <-errs)
+	// and let the service.sh watchdog restart the daemon with all queues bound.
+	logf("exiting: %v", <-errs)
 	closeQueues(queues)
 	os.Exit(1)
 }

@@ -6,10 +6,13 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 // moduleDir is the directory containing the daemon binary, i.e. the
@@ -30,13 +33,6 @@ func getWebrootFile() string {
 	return filepath.Join(moduleDir(), "webroot", "index.html")
 }
 
-// getStatsPath keeps stats in the root-only module dir. The old location,
-// /data/local/tmp, is writable by the adb shell user, who could plant a
-// symlink there and have the root daemon overwrite any file.
-func getStatsPath() string {
-	return filepath.Join(moduleDir(), "stats.json")
-}
-
 type Config struct {
 	QueueNum          uint16 `json:"QUEUE_NUM"`
 	TargetTTL         uint8  `json:"TARGET_TTL"`
@@ -49,7 +45,7 @@ type Config struct {
 	DohProvider       string `json:"DOH_PROVIDER"`
 }
 
-var cfg = Config{
+var defaultConfig = Config{
 	QueueNum:          6464,
 	TargetTTL:         64,
 	TcpSplit:          true,
@@ -61,55 +57,104 @@ var cfg = Config{
 	DohProvider:       "cloudflare",
 }
 
-func loadConfig(path string) {
-	file, err := os.Open(path)
-	if err != nil {
-		return
-	}
-	defer file.Close()
+// The active config is an immutable snapshot: readers (packet workers, DNS,
+// web UI) take one consistent snapshot per use, writers publish a new one.
+var currentCfg atomic.Pointer[Config]
 
-	scanner := bufio.NewScanner(file)
+// cfgWriteMu serializes read-modify-write updates (web API, SIGHUP reload)
+// so concurrent writers cannot lose each other's changes.
+var cfgWriteMu sync.Mutex
+
+func init() {
+	setCfg(defaultConfig)
+}
+
+// cfgSnapshot returns the active config. Callers must not modify it.
+func cfgSnapshot() *Config {
+	return currentCfg.Load()
+}
+
+func setCfg(c Config) {
+	currentCfg.Store(&c)
+}
+
+func parseBool(v string) bool {
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
+// parseConfig returns base with the valid KEY=VALUE lines from r applied.
+// Invalid or out-of-range values keep the base value.
+func parseConfig(base Config, r io.Reader) Config {
+	c := base
+	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
 			continue
 		}
-		k := strings.TrimSpace(parts[0])
-		v := strings.TrimSpace(parts[1])
+		applyConfigValue(&c, strings.TrimSpace(k), strings.TrimSpace(v))
+	}
+	return c
+}
 
-		switch k {
-		case "TARGET_TTL":
-			if val, err := strconv.Atoi(v); err == nil && val > 0 && val <= 255 {
-				cfg.TargetTTL = uint8(val)
-			}
-		case "TCP_SPLIT":
-			cfg.TcpSplit = (v == "1" || strings.ToLower(v) == "true")
-		case "SPLIT_POS":
-			if val, err := strconv.Atoi(v); err == nil && val > 0 && val < 100 {
-				cfg.SplitPos = val
-			}
-		case "BUFFERBLOAT_QOS":
-			cfg.BufferbloatQoS = (v == "1" || strings.ToLower(v) == "true")
-		case "WIFI_POWER_SAVE_LOCK":
-			cfg.WifiPowerSaveLock = (v == "1" || strings.ToLower(v) == "true")
-		case "TCP_LOW_LATENCY":
-			cfg.TcpLowLatency = (v == "1" || strings.ToLower(v) == "true")
-		case "DOH_ENABLED":
-			cfg.DohEnabled = (v == "1" || strings.ToLower(v) == "true")
-		case "DOH_PROVIDER":
-			if _, ok := lookupDoHProvider(v); ok {
-				cfg.DohProvider = strings.ToLower(v)
-			}
-		case "QUEUE_NUM":
-			if val, err := strconv.Atoi(v); err == nil && val > 0 && val <= 65535-NUM_QUEUES {
-				cfg.QueueNum = uint16(val)
-			}
+func applyConfigValue(c *Config, k, v string) {
+	switch k {
+	case "TARGET_TTL":
+		if val, err := strconv.Atoi(v); err == nil && val > 0 && val <= 255 {
+			c.TargetTTL = uint8(val)
+		}
+	case "TCP_SPLIT":
+		c.TcpSplit = parseBool(v)
+	case "SPLIT_POS":
+		if val, err := strconv.Atoi(v); err == nil && val > 0 && val < 100 {
+			c.SplitPos = val
+		}
+	case "BUFFERBLOAT_QOS":
+		c.BufferbloatQoS = parseBool(v)
+	case "WIFI_POWER_SAVE_LOCK":
+		c.WifiPowerSaveLock = parseBool(v)
+	case "TCP_LOW_LATENCY":
+		c.TcpLowLatency = parseBool(v)
+	case "DOH_ENABLED":
+		c.DohEnabled = parseBool(v)
+	case "DOH_PROVIDER":
+		if _, ok := lookupDoHProvider(v); ok {
+			c.DohProvider = strings.ToLower(v)
+		}
+	case "QUEUE_NUM":
+		if val, err := strconv.Atoi(v); err == nil && val > 0 && val <= 65535-NUM_QUEUES {
+			c.QueueNum = uint16(val)
 		}
 	}
+}
+
+// loadConfigFile returns base overlaid with the file's settings; a missing
+// or unreadable file yields base unchanged.
+func loadConfigFile(path string, base Config) Config {
+	f, err := os.Open(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			logf("read config %s: %v", path, err)
+		}
+		return base
+	}
+	defer f.Close()
+	return parseConfig(base, f)
+}
+
+// reloadConfig re-reads config.conf (on SIGHUP, e.g. after a manual edit).
+// QueueNum cannot change while queues are bound, so the running value stays.
+func reloadConfig() {
+	cfgWriteMu.Lock()
+	defer cfgWriteMu.Unlock()
+	running := cfgSnapshot().QueueNum
+	next := loadConfigFile(getConfigPath(), defaultConfig)
+	next.QueueNum = running
+	setCfg(next)
 }
 
 // saveConfigToFile writes the config atomically (temp file + rename) so a

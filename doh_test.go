@@ -59,10 +59,12 @@ func TestDoHProvidersLive(t *testing.T) {
 	// Minimal query: ID 0x1234, RD, 1 question, example.com A IN.
 	query := []byte{0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0x00, 0x01, 0x00, 0x01}
-	original := cfg.DohProvider
-	defer func() { cfg.DohProvider = original }()
+	original := *cfgSnapshot()
+	defer setCfg(original)
 	for name := range dohProviders {
-		cfg.DohProvider = name
+		next := original
+		next.DohProvider = name
+		setCfg(next)
 		resp, err := queryDoH(query)
 		if err != nil {
 			t.Errorf("%s: %v", name, err)

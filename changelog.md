@@ -1,5 +1,16 @@
 # 🛡️ GKI-Tether-Shield Changelog
 
+## Version 3.7
+* **Every Chipset**: TTL fixing no longer depends on Qualcomm `rmnet` interface names; MediaTek, Exynos, Tensor, Unisoc and 464XLAT (CLAT) connections are covered too.
+* **Settings Kept on Update**: Your configuration now survives module updates. (Updating from 3.5 to 3.6 reset it once; please re-apply your settings if needed.)
+* **Self-Healing Daemon**: A watchdog restarts the daemon if it stops, and errors are logged to `daemon.log` (`ttlshield log`).
+* **Live Settings**: `TARGET_TTL` and `QUEUE_NUM` are now applied to the firewall rules, and edits to `config.conf` take effect within seconds without a reboot.
+* **Security**: Only the companion app (or root / ADB) can change settings; the update banner only accepts this project's release links; the DNS proxy accepts hotspot clients only, on any chipset.
+* **IPv6 DNS**: Tethered clients' IPv6 DNS queries are now encrypted through the DoH proxy as well.
+* **Smarter DNS Cache**: Honors record lifetimes, never caches failures, and merges identical lookups.
+* **Battery**: No more stats file written every 3 seconds; the dashboard stops polling when hidden. `ttlshield status` now shows live numbers.
+* **Fixed**: Thread-safety of settings shared between the packet workers and the dashboard.
+
 ## Version 3.6
 * **Security**: DNS-over-HTTPS now verifies TLS certificates; the WebUI config API rejects cross-site requests, DNS rebinding and config injection; the DNS proxy is no longer reachable from the cellular network; stats moved out of the shell-writable `/data/local/tmp`.
 * **Stability**: Malformed packets from hotspot clients can no longer crash the daemon.

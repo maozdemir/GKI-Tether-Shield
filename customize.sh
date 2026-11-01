@@ -1,9 +1,9 @@
 SKIPUNZIP=0
 
+VERSION="$(sed -n 's/^version=//p' "$MODPATH/module.prop" | head -n1)"
 ui_print "*****************************************"
-ui_print "*   GKI Hotspot Shield & TTL/DPI Fixer  *"
-ui_print "*                  v3.6                 *"
-ui_print "*             by alperozd               *"
+ui_print "*   GKI Tether Shield & TTL/DPI Fixer   *"
+ui_print "*   ${VERSION:-unknown} by maozdemir"
 ui_print "*****************************************"
 
 ui_print "- Setting up permissions..."
@@ -11,6 +11,16 @@ set_perm "$MODPATH/tether_shield" 0 0 0755
 set_perm "$MODPATH/service.sh" 0 0 0755
 set_perm "$MODPATH/action.sh" 0 0 0755
 set_perm "$MODPATH/system/bin/ttlshield" 0 0 0755
+
+# Updates are installed as a fresh module directory, which would reset the
+# user's settings to the shipped defaults. Carry the live config over; keys
+# added in newer versions fall back to their defaults when missing.
+OLD_CONF="/data/adb/modules/${MODID:-gki_hotspot_shield}/config.conf"
+if [ -f "$OLD_CONF" ] && [ "$OLD_CONF" != "$MODPATH/config.conf" ]; then
+    ui_print "- Keeping your existing settings..."
+    cp -f "$OLD_CONF" "$MODPATH/config.conf"
+    set_perm "$MODPATH/config.conf" 0 0 0644
+fi
 
 ui_print "- Installing mini config companion app (zero drawer icon)..."
 if [ -f "$MODPATH/HotspotShieldManager.apk" ]; then

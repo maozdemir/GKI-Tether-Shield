@@ -173,6 +173,8 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 		"dns_last_fallback":    lastDNSFallback.Load(),
 		"target_ttl":           c.TargetTTL,
 		"tcp_split_enabled":    c.TcpSplit,
+		"block_quic":           c.BlockQUIC,
+		"bufferbloat_qos":      c.BufferbloatQoS,
 		"doh_enabled":          c.DohEnabled,
 		"doh_provider":         c.DohProvider,
 		"version":              moduleVersion,

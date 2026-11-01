@@ -280,24 +280,42 @@ All Generic Kernel Image (GKI) kernels (5.4, 5.10, 5.15, 6.1, 6.6, 6.12+) runnin
 ## 🛠️ Building from Source
 
 ### Requirements
-- Go 1.22+
+- Go 1.24+
+- `zip` and a POSIX shell (Linux / macOS / WSL / Git Bash)
 - Android SDK (build-tools 34+) for companion APK compilation (optional)
-- PowerShell (Windows) or Bash (Linux / macOS)
 
 ### Compiling Daemon
 ```bash
 # Windows PowerShell
-$env:GOOS="linux"; $env:GOARCH="arm64"; go build -ldflags="-s -w" -o nfqttl main.go
+$env:GOOS="linux"; $env:GOARCH="arm64"; go build -trimpath -ldflags="-s -w" -o nfqttl .
 
 # Linux / macOS
-GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o nfqttl main.go
+GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o nfqttl .
+```
+
+### Testing
+```bash
+GOOS=linux go vet . && go test ./...   # tests run on Linux (or WSL)
 ```
 
 ### Packaging Module ZIP
 ```bash
-# Package the Magisk / KernelSU module
-zip -r9 GKI-Tether-Shield.zip module.prop config.conf service.sh customize.sh action.sh uninstall.sh HotspotShieldManager.apk nfqttl system webroot META-INF
+sh scripts/package.sh v3.5-dev dist   # writes dist/GKI_Tether_Shield_v3.5-dev.zip
 ```
+
+### Releasing
+Pushes to `main` and pull requests only build and test; the module ZIP is
+attached to the workflow run as an artifact. A GitHub release is created only
+when a version tag is pushed:
+
+1. Bump `version` / `versionCode` in `module.prop`, `MODULE_VERSION` /
+   `MODULE_VERSION_CODE` in `main.go`, and `update.json`; add a `changelog.md`
+   entry. `sh scripts/check-version.sh` verifies they agree.
+2. Merge to `main`, then tag that commit: `git tag v3.6 && git push origin v3.6`.
+
+The release job refuses tags that don't match `module.prop`, tags not on
+`main`, and versions that already have a release, so a published release is
+never overwritten.
 
 ---
 

@@ -90,11 +90,21 @@ iptables -t mangle -C POSTROUTING -o rmnet+ -j $CHAIN 2>/dev/null || iptables -t
 iptables -t mangle -C FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 # 7. Transparent DNS-over-HTTPS (DoH) Redirection (Port 53 -> 53545)
-iptables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null
-iptables -t nat -D PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null
+# Only tethered/local clients may use the proxy: DNS arriving on the
+# cellular WAN is never redirected, and direct access to port 53545 from
+# the WAN is dropped, so the phone is not an open resolver / DNS
+# amplifier when the carrier assigns a reachable IP.
+for proto in udp tcp; do
+    # Upgrade cleanup: v3.1-v3.3 redirected to 5353; v3.4-v3.5 redirected
+    # without an interface restriction.
+    iptables -t nat -D PREROUTING -p $proto --dport 53 -j REDIRECT --to-ports 5353 2>/dev/null
+    iptables -t nat -D PREROUTING -p $proto --dport 53 -j REDIRECT --to-ports 53545 2>/dev/null
 
-iptables -t nat -C PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 53545 2>/dev/null || iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 53545
-iptables -t nat -C PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 53545 2>/dev/null || iptables -t nat -A PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 53545
+    iptables -t nat -C PREROUTING ! -i rmnet+ -p $proto --dport 53 -j REDIRECT --to-ports 53545 2>/dev/null ||
+        iptables -t nat -A PREROUTING ! -i rmnet+ -p $proto --dport 53 -j REDIRECT --to-ports 53545
+    iptables -C INPUT -i rmnet+ -p $proto --dport 53545 -j DROP 2>/dev/null ||
+        iptables -I INPUT -i rmnet+ -p $proto --dport 53545 -j DROP
+done
 
 # 8. Dynamic Hotspot-Aware QoS & Power Saver Guard
 (

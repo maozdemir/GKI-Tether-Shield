@@ -86,6 +86,16 @@ iptables -t mangle -I $CHAIN 1 -p tcp -m multiport --dports 80,443 \
 # rmnet+ also matches rmnet_data*, so one rule covers both.
 iptables -t mangle -C POSTROUTING -o rmnet+ -j $CHAIN 2>/dev/null || iptables -t mangle -A POSTROUTING -o rmnet+ -j $CHAIN
 
+# IPv6: forwarded packets leave with Hop Limit 63 (or 127/254), which is how
+# carriers detect tethering on IPv6-only / 464XLAT networks. Queue non-64
+# hop limits to the same queues; the daemon rewrites IPv6 Hop Limit too.
+# Falls back to queueing all WAN IPv6 if the hl match is unavailable.
+ip6tables -t mangle -N $CHAIN 2>/dev/null
+ip6tables -t mangle -F $CHAIN
+ip6tables -t mangle -A $CHAIN -m hl ! --hl-eq 64 -j NFQUEUE $QUEUE_TARGET 2>/dev/null ||
+    ip6tables -t mangle -A $CHAIN -j NFQUEUE $QUEUE_TARGET
+ip6tables -t mangle -C POSTROUTING -o rmnet+ -j $CHAIN 2>/dev/null || ip6tables -t mangle -A POSTROUTING -o rmnet+ -j $CHAIN
+
 # 6. TCP MSS Clamping to PMTU
 iptables -t mangle -C FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A FORWARD -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 

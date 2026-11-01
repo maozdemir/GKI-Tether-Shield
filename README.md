@@ -75,7 +75,8 @@ Lastly, legacy userspace daemons ran a single-threaded queue and modified payloa
 
 ### 2. 🛡️ GoodbyeDPI / Zapret TLS ClientHello TCP Segmentation
 - Inspects initial HTTPS TLS ClientHello (SNI) and HTTP cleartext requests.
-- Splits TCP payloads into segments at byte-level using raw socket injection.
+- Splits the first data segment **inside the server name** (TLS SNI / HTTP Host) using raw socket injection, so no single packet carries the full name; falls back to a fixed byte position (`SPLIT_MODE=fixed`). Works over IPv4 and IPv6.
+- Optionally rejects HTTP/3 (QUIC, UDP 443) so browsers fall back to TCP, where splitting applies (`BLOCK_QUIC`).
 - Evades SNI-based DPI middleboxes and domain filtering for all tethered clients (Windows, macOS, iOS, Android, Linux, consoles).
 - **Isolated to Web Ports (80, 443, 8080, 8443):** non-web protocols (BitTorrent, gaming UDP, custom ports) are never split, preventing protocol corruption.
 - Only the first 6 packets of each web connection are inspected (`connbytes`), so streaming and downloads skip DPI processing.
@@ -90,7 +91,8 @@ Lastly, legacy userspace daemons ran a single-threaded queue and modified payloa
   - **Google DNS** (`8.8.8.8`)
   - **AdGuard DNS** (`94.140.14.14` - network-wide ad & tracker blocking)
 - **In-Memory Cache:** honors record TTLs (5 s – 5 min), never caches failures, and merges identical concurrent lookups.
-- **Automatic Fallback:** if DoH fails (or DoH is switched off), queries fall back to plain UDP `1.1.1.1:53` so name resolution keeps working. Fallback queries are **not encrypted**.
+- **Automatic Fallback:** if DoH fails (or DoH is switched off), queries fall back to plain UDP `1.1.1.1:53` so name resolution keeps working. Fallback queries are **not encrypted**; the dashboard counts them and warns while DoH is failing.
+- Cached answers report their remaining TTL, so clients never cache longer than the record allows.
 - **Zero Configuration:** Tethered devices require no manual DNS setup.
 
 ### 4. 🎮 Anti-Bufferbloat Fair Queueing (`fq_codel` QoS)
@@ -162,6 +164,10 @@ TARGET_TTL=64
 # DPI Evasion / TCP Segmentation (Zapret / GoodbyeDPI mode)
 TCP_SPLIT=1
 SPLIT_POS=2
+# Split inside the TLS SNI / HTTP Host name (auto) or always at SPLIT_POS (fixed)
+SPLIT_MODE=auto
+# Reject HTTP/3 (QUIC, UDP 443) so browsers fall back to TCP, where splitting applies
+BLOCK_QUIC=1
 # First of 4 consecutive NFQUEUE numbers (6464-6467); change only on conflicts
 QUEUE_NUM=6464
 

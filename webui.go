@@ -72,6 +72,7 @@ func applyConfigUpdate(base Config, update map[string]any) (Config, error) {
 	}
 	boolFields := map[string]*bool{
 		"TCP_SPLIT":            &next.TcpSplit,
+		"BLOCK_QUIC":           &next.BlockQUIC,
 		"BUFFERBLOAT_QOS":      &next.BufferbloatQoS,
 		"WIFI_POWER_SAVE_LOCK": &next.WifiPowerSaveLock,
 		"TCP_LOW_LATENCY":      &next.TcpLowLatency,

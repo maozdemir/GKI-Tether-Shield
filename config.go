@@ -4,27 +4,37 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
 
+// moduleDir is the directory containing the daemon binary, i.e. the
+// module's own directory wherever the root manager installed it.
+func moduleDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return DEFAULT_MODULE_DIR
+	}
+	return filepath.Dir(exe)
+}
+
 func getConfigPath() string {
-	if _, err := os.Stat("/data/adb/modules/gki_hotspot_shield/config.conf"); err == nil {
-		return "/data/adb/modules/gki_hotspot_shield/config.conf"
-	}
-	if _, err := os.Stat("/data/adb/modules/nfqttl/config.conf"); err == nil {
-		return "/data/adb/modules/nfqttl/config.conf"
-	}
-	return DEFAULT_CONFIG_PATH
+	return filepath.Join(moduleDir(), "config.conf")
 }
 
 func getWebrootFile() string {
-	if _, err := os.Stat("/data/adb/modules/gki_hotspot_shield/webroot/index.html"); err == nil {
-		return "/data/adb/modules/gki_hotspot_shield/webroot/index.html"
-	}
-	return "/data/adb/modules/nfqttl/webroot/index.html"
+	return filepath.Join(moduleDir(), "webroot", "index.html")
+}
+
+// getStatsPath keeps stats in the root-only module dir. The old location,
+// /data/local/tmp, is writable by the adb shell user, who could plant a
+// symlink there and have the root daemon overwrite any file.
+func getStatsPath() string {
+	return filepath.Join(moduleDir(), "stats.json")
 }
 
 type Config struct {
@@ -117,9 +127,23 @@ DOH_PROVIDER=%s
 QUEUE_NUM=%d
 `, c.TargetTTL, c.TcpSplit, c.SplitPos, c.BufferbloatQoS, c.WifiPowerSaveLock, c.TcpLowLatency, c.DohEnabled, c.DohProvider, c.QueueNum)
 
+	return writeFileAtomic(path, []byte(content), 0o644)
+}
+
+// writeFileAtomic writes via a temp file + rename, so readers never see a
+// partial file and an existing symlink at path is replaced, not followed.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", tmp, err)
+	_ = os.Remove(tmp)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", tmp, err)
+	}
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write %s: %w", tmp, errors.Join(werr, cerr))
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)

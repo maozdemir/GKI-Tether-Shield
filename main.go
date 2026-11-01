@@ -39,8 +39,7 @@ const (
 	SOL_NETLINK        = 270
 	NETLINK_NO_ENOBUFS = 5
 
-	DEFAULT_CONFIG_PATH = "/data/adb/modules/gki_hotspot_shield/config.conf"
-	STATS_PATH          = "/data/local/tmp/ttlfixer_stats.json"
+	DEFAULT_MODULE_DIR  = "/data/adb/modules/gki_hotspot_shield"
 	WEB_PORT            = 64640
 	DNS_PORT            = 53545
 	MODULE_VERSION      = "v3.5"
@@ -85,14 +84,16 @@ func writeStats() {
 		cfg.DohProvider,
 		time.Now().Format(time.RFC3339),
 	)
-	_ = os.WriteFile(STATS_PATH, []byte(jsonContent), 0644)
+	if err := writeFileAtomic(getStatsPath(), []byte(jsonContent), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "write stats: %v\n", err)
+	}
 }
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "status" || os.Args[1] == "-status" || os.Args[1] == "--status") {
-		data, err := os.ReadFile(STATS_PATH)
+		data, err := os.ReadFile(getStatsPath())
 		if err != nil {
-			fmt.Println("No stats available. Is ttlfixer running?")
+			fmt.Println("No stats available. Is the daemon running?")
 			os.Exit(1)
 		}
 		fmt.Println(string(data))

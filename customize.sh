@@ -22,6 +22,8 @@ if [ -f "$MODPATH/HotspotShieldManager.apk" ]; then
 fi
 
 ui_print "- Initializing service..."
+# v3.5 and earlier kept stats in the shell-writable /data/local/tmp
+rm -f /data/local/tmp/ttlfixer_stats.json
 killall -9 nfqttl ttlfixer 2>/dev/null
 nohup sh "$MODPATH/service.sh" </dev/null >/dev/null 2>&1 &
 

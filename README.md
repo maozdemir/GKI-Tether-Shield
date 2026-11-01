@@ -135,7 +135,7 @@ GKI-Tether-Shield includes a modern configuration interface designed to never cl
 
 ## ⚙️ Configuration (`config.conf`)
 
-Settings can be toggled in real-time either via the **In-App Manager**, **WebUI**, or by editing `/data/adb/modules/gki_hotspot_shield/config.conf` (or `/data/adb/modules/nfqttl/config.conf`):
+Settings can be toggled in real-time either via the **In-App Manager**, **WebUI**, or by editing `/data/adb/modules/gki_hotspot_shield/config.conf`:
 
 ```ini
 # ==========================================

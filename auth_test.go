@@ -3,11 +3,15 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -132,5 +136,60 @@ func TestRequestUIDRealSocket(t *testing.T) {
 
 	if uid := <-got; uid != uint32(os.Getuid()) {
 		t.Fatalf("requestUID = %d, want %d", uid, os.Getuid())
+	}
+}
+
+func TestHelloHandlerProvesTokenKnowledge(t *testing.T) {
+	const token = "0123456789abcdef"
+	h := helloHandler(token)
+
+	nonce := "00112233445566778899aabbccddeeff"
+	r := httptest.NewRequest(http.MethodGet, "/api/hello?nonce="+nonce, nil)
+	r.Host = "127.0.0.1:64640"
+	w := httptest.NewRecorder()
+	h(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	mac := hmac.New(sha256.New, []byte(token))
+	mac.Write([]byte("tshield-hello:" + nonce))
+	want := hex.EncodeToString(mac.Sum(nil))
+	if !strings.Contains(w.Body.String(), `"proof":"`+want+`"`) {
+		t.Fatalf("body %q does not carry the expected proof", w.Body.String())
+	}
+
+	for _, bad := range []string{"", "xyz", "00", strings.Repeat("a", 200)} {
+		r := httptest.NewRequest(http.MethodGet, "/api/hello?nonce="+bad, nil)
+		r.Host = "127.0.0.1:64640"
+		w := httptest.NewRecorder()
+		h(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("nonce %q: status %d, want 400", bad, w.Code)
+		}
+	}
+
+	w = httptest.NewRecorder()
+	helloHandler("")(w, httptest.NewRequest(http.MethodGet, "/api/hello?nonce="+nonce, nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("without a token: status %d, want 503", w.Code)
+	}
+}
+
+func TestLoadOrCreateWebUITokenReusesExisting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".webui_token")
+	first, err := loadOrCreateWebUIToken(path)
+	if err != nil || len(first) != 48 {
+		t.Fatalf("create: %q, %v", first, err)
+	}
+	second, err := loadOrCreateWebUIToken(path)
+	if err != nil || second != first {
+		t.Fatalf("restart must reuse the boot's token: %q vs %q (%v)", second, first, err)
+	}
+	if err := os.WriteFile(path, []byte("not-a-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	third, err := loadOrCreateWebUIToken(path)
+	if err != nil || third == "not-a-token" || len(third) != 48 {
+		t.Fatalf("invalid token file must be replaced: %q, %v", third, err)
 	}
 }

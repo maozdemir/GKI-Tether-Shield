@@ -190,6 +190,7 @@ func startHTTPServer() {
 	mux.HandleFunc("/", requireTrustedLocal(indexHandler))
 	mux.HandleFunc("/api/stats", requireTrustedLocal(statsHandler))
 	mux.HandleFunc("/api/config", configHandler(getConfigPath, auth.allowed))
+	mux.HandleFunc("/api/hello", requireTrustedLocal(helloHandler(token)))
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", WEB_PORT),

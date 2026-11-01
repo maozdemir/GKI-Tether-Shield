@@ -4,9 +4,12 @@ package main
 
 import (
 	"bufio"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -156,16 +159,55 @@ func (a *writeAuthorizer) allowed(r *http.Request) bool {
 	return isTrustedUID(uid, appID, appKnown)
 }
 
-// createWebUIToken writes a fresh random token to the root-only module dir
-// for action.sh to hand to the browser fallback.
-func createWebUIToken() (string, error) {
-	buf := make([]byte, 24)
+const webUITokenBytes = 24 // hex-encoded: 48 characters
+
+// loadOrCreateWebUIToken returns the token stored at path, creating a new
+// random one if the file is missing or invalid. service.sh deletes the file
+// at boot, so the token changes every boot but survives watchdog restarts
+// (an open companion app keeps working). action.sh hands it to the
+// companion app and the browser fallback.
+func loadOrCreateWebUIToken(path string) (string, error) {
+	if data, err := os.ReadFile(path); err == nil {
+		token := strings.TrimSpace(string(data))
+		if decoded, err := hex.DecodeString(token); err == nil && len(decoded) == webUITokenBytes {
+			return token, nil
+		}
+	}
+	buf := make([]byte, webUITokenBytes)
 	if _, err := rand.Read(buf); err != nil {
 		return "", fmt.Errorf("generate web UI token: %w", err)
 	}
 	token := hex.EncodeToString(buf)
-	if err := writeFileAtomic(filepath.Join(moduleDir(), webUITokenFile), []byte(token), 0o600); err != nil {
+	if err := writeFileAtomic(path, []byte(token), 0o600); err != nil {
 		return "", err
 	}
 	return token, nil
+}
+
+func createWebUIToken() (string, error) {
+	return loadOrCreateWebUIToken(filepath.Join(moduleDir(), webUITokenFile))
+}
+
+// helloHandler lets a client verify it is talking to the real daemon before
+// trusting the page on 127.0.0.1:64640. Another app could bind that port
+// while the daemon is down and serve a page inside the trusted companion
+// app; only the daemon knows the token, so only it can answer
+// HMAC-SHA256(token, "tshield-hello:" + nonce) for the client's fresh nonce.
+func helloHandler(token string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if token == "" {
+			writeJSONError(w, http.StatusServiceUnavailable, "no web UI token")
+			return
+		}
+		nonce := r.URL.Query().Get("nonce")
+		if decoded, err := hex.DecodeString(nonce); err != nil || len(decoded) < 16 || len(decoded) > 64 {
+			writeJSONError(w, http.StatusBadRequest, "nonce must be 16-64 random bytes, hex encoded")
+			return
+		}
+		mac := hmac.New(sha256.New, []byte(token))
+		mac.Write([]byte("tshield-hello:" + nonce))
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(map[string]string{"proof": hex.EncodeToString(mac.Sum(nil))})
+	}
 }

@@ -157,6 +157,8 @@ start_daemon() {
 }
 
 killall -9 tether_shield 2>/dev/null
+# New web UI token every boot (the daemon reuses it across watchdog restarts).
+rm -f "$MODDIR/.webui_token"
 setup_dns_rules
 start_daemon
 

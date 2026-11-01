@@ -354,7 +354,12 @@
     // Check for updates only once the running version is known, so a slow
     // daemon response can't make the current release look outdated.
     fetchStats().then(() => { if (currentVersionCode > 0) checkForUpdates(); });
-    setInterval(fetchStats, 2000);
+    // Don't poll while the page is hidden (background tab, screen off);
+    // refresh immediately when it becomes visible again.
+    setInterval(() => { if (!document.hidden) fetchStats(); }, 2000);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) fetchStats();
+    });
     setInterval(() => { if (currentVersionCode > 0) checkForUpdates(); }, 60000);
   </script>
 </body>

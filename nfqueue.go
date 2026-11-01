@@ -159,7 +159,7 @@ func (q *queueWorker) close() {
 }
 
 // run receives and handles packets until a non-recoverable socket error.
-func (q *queueWorker) run(rawFd int) error {
+func (q *queueWorker) run(raw rawSender) error {
 	buf := make([]byte, recvBufBytes)
 	for {
 		n, _, err := syscall.Recvfrom(q.fd, buf, 0)
@@ -171,7 +171,7 @@ func (q *queueWorker) run(rawFd int) error {
 		}
 		parseNfqMessages(buf[:n], func(packetID uint32, payload []byte) {
 			atomic.AddUint64(&totalPackets, 1)
-			handlePacket(q.fd, rawFd, q.qNum, packetID, payload)
+			handlePacket(q.fd, raw, q.qNum, packetID, payload)
 		})
 	}
 }

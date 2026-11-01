@@ -202,6 +202,11 @@ setup_queue_rules() {
     ip6tables -t mangle -F $CHAIN
     ip6tables -t mangle -A $CHAIN -m hl ! --hl-eq "$TTL" -j NFQUEUE $QUEUE_TARGET 2>/dev/null ||
         ip6tables -t mangle -A $CHAIN -j NFQUEUE $QUEUE_TARGET
+    # IPv6 web handshakes for DPI splitting, as for IPv4 above.
+    ip6tables -t mangle -I $CHAIN 1 -p tcp -m multiport --dports 80,443 \
+        -m connbytes --connbytes-dir original --connbytes-mode packets --connbytes 1:6 \
+        -j NFQUEUE $QUEUE_TARGET 2>/dev/null ||
+        ip6tables -t mangle -I $CHAIN 1 -p tcp -m multiport --dports 80,443 -j NFQUEUE $QUEUE_TARGET
 
     for ipt in iptables ip6tables; do
         $ipt -t mangle -N $WAN_CHAIN 2>/dev/null

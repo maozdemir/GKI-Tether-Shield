@@ -92,11 +92,8 @@ func main() {
 	logf("Starting %s (WebUI: %d, DoH DNS: %d, Target TTL: %d, TCP Split: %v)",
 		moduleVersion, WEB_PORT, DNS_PORT, startCfg.TargetTTL, startCfg.TcpSplit)
 
-	rawFd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
-	if err == nil {
-		_ = syscall.SetsockoptInt(rawFd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1)
-		defer syscall.Close(rawFd)
-	}
+	raw := openRawSockets()
+	defer raw.close()
 
 	queues, err := openQueues(startCfg.QueueNum, NUM_QUEUES)
 	if err != nil {
@@ -121,7 +118,7 @@ func main() {
 
 	errs := make(chan error, len(queues))
 	for _, q := range queues {
-		go func(q *queueWorker) { errs <- q.run(rawFd) }(q)
+		go func(q *queueWorker) { errs <- q.run(raw) }(q)
 	}
 	// Any queue dying means its share of traffic bypasses TTL fixing, so exit
 	// and let the service.sh watchdog restart the daemon with all queues bound.

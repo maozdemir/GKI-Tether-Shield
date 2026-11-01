@@ -210,8 +210,7 @@ func resolveDoH(query []byte) ([]byte, error) {
 		return resp, nil
 	})
 	if err != nil {
-		// Fallback to plain DNS if DoH failed
-		return resolvePlainUDP(query)
+		return resolveFallback(query, err)
 	}
 	return withQueryID(v.([]byte), query), nil
 }

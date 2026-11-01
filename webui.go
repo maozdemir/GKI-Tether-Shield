@@ -152,20 +152,23 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	c := cfgSnapshot()
 	stats := map[string]any{
-		"total_packets":     atomic.LoadUint64(&totalPackets),
-		"ipv4_packets":      atomic.LoadUint64(&ipv4Packets),
-		"ipv6_packets":      atomic.LoadUint64(&ipv6Packets),
-		"ttl_modified":      atomic.LoadUint64(&ttlModified),
-		"tcp_split_packets": atomic.LoadUint64(&tcpSplitPkts),
-		"doh_queries":       atomic.LoadUint64(&dohQueries),
-		"dns_cache_hits":    atomic.LoadUint64(&dnsCacheHits),
-		"target_ttl":        c.TargetTTL,
-		"tcp_split_enabled": c.TcpSplit,
-		"doh_enabled":       c.DohEnabled,
-		"doh_provider":      c.DohProvider,
-		"version":           moduleVersion,
-		"version_code":      versionCode(),
-		"updated_at":        time.Now().Format(time.RFC3339),
+		"total_packets":        atomic.LoadUint64(&totalPackets),
+		"ipv4_packets":         atomic.LoadUint64(&ipv4Packets),
+		"ipv6_packets":         atomic.LoadUint64(&ipv6Packets),
+		"ttl_modified":         atomic.LoadUint64(&ttlModified),
+		"tcp_split_packets":    atomic.LoadUint64(&tcpSplitPkts),
+		"doh_queries":          atomic.LoadUint64(&dohQueries),
+		"dns_cache_hits":       atomic.LoadUint64(&dnsCacheHits),
+		"dns_fallback_queries": atomic.LoadUint64(&dnsFallbackQueries),
+		"dns_plain_queries":    atomic.LoadUint64(&dnsPlainQueries),
+		"dns_last_fallback":    lastDNSFallback.Load(),
+		"target_ttl":           c.TargetTTL,
+		"tcp_split_enabled":    c.TcpSplit,
+		"doh_enabled":          c.DohEnabled,
+		"doh_provider":         c.DohProvider,
+		"version":              moduleVersion,
+		"version_code":         versionCode(),
+		"updated_at":           time.Now().Format(time.RFC3339),
 	}
 	_ = json.NewEncoder(w).Encode(stats)
 }

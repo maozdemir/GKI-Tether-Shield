@@ -4,9 +4,11 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -175,5 +177,36 @@ func TestDNSProxyAnswersOverIPv4AndIPv6(t *testing.T) {
 		if err != nil || binary.BigEndian.Uint16(resp[:2]) != 0x0c0d {
 			t.Fatalf("TCP over %s: bad response %v", host, err)
 		}
+	}
+}
+
+func TestFallbackAndPlainQueriesAreCounted(t *testing.T) {
+	clearDNSCache(t)
+	withPlainUpstream(t, startFakeUpstream(t, func(q []byte) [][]byte { return [][]byte{answerFor(q)} }))
+	withDoHQuery(t, func([]byte) ([]byte, error) { return nil, errors.New("doh down") })
+
+	fallbackBefore := atomic.LoadUint64(&dnsFallbackQueries)
+	withDoHEnabled(t, true)
+	resp, err := resolveDNS(dnsQuery(0x0101))
+	if err != nil || binary.BigEndian.Uint16(resp[:2]) != 0x0101 {
+		t.Fatalf("fallback answer: %v", err)
+	}
+	if got := atomic.LoadUint64(&dnsFallbackQueries) - fallbackBefore; got != 1 {
+		t.Fatalf("fallback counter rose by %d, want 1", got)
+	}
+	if lastDNSFallback.Load() == 0 {
+		t.Fatal("last fallback time must be recorded")
+	}
+
+	plainBefore := atomic.LoadUint64(&dnsPlainQueries)
+	withDoHEnabled(t, false)
+	if _, err := resolveDNS(dnsQuery(0x0202)); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadUint64(&dnsPlainQueries) - plainBefore; got != 1 {
+		t.Fatalf("plain counter rose by %d, want 1", got)
+	}
+	if got := atomic.LoadUint64(&dnsFallbackQueries) - fallbackBefore; got != 1 {
+		t.Fatal("DoH switched off must not count as a fallback")
 	}
 }

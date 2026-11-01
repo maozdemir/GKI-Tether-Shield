@@ -66,6 +66,9 @@ var (
 	ipv6Packets  uint64
 	dohQueries   uint64
 	dnsCacheHits uint64
+	// Unencrypted DNS: DoH was enabled but failed (fallback) / DoH is off.
+	dnsFallbackQueries uint64
+	dnsPlainQueries    uint64
 )
 
 func main() {

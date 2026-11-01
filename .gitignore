@@ -8,3 +8,6 @@
 /PRODUCT.md
 /DESIGN.md
 /.impeccable/
+
+# Planning docs stay local; never committed
+/docs/*plan*.md

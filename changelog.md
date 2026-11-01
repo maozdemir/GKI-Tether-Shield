@@ -4,6 +4,12 @@
 * **WebUI Button Fixed**: The KernelSU / APatch / MMRL WebUI button now shows live stats and saves settings (it previously could not reach the service).
 * **Companion App Rebuilt**: Built from source; it now verifies it is talking to the real service before showing anything, pauses when in the background, opens links in your browser, and only uses plain HTTP for the local dashboard. Updates reinstall it automatically if needed.
 * **Command Line**: `ttlshield config get` and `ttlshield config set '<json>'` read and change settings from a root shell.
+* **New Dashboard**: Redesigned as a "plan sheet" that shows what the shield is doing right now: packets disguised, handshakes split, encrypted DNS, cache hits, HTTP/3 and fair queueing. Every setting has a "What it does" note explaining how it works and when to change it. Fully offline: fonts and styles ship inside the module.
+* **Smarter Splitting**: The TLS / HTTP handshake is now cut inside the server name itself (`SPLIT_MODE=auto`, default), so no packet carries the whole name. `SPLIT_MODE=fixed` keeps the old fixed-byte split. IPv6 web connections are split too.
+* **Optional HTTP/3 Block**: `BLOCK_QUIC=1` rejects QUIC (UDP 443) so browsers fall back to TCP, where splitting works. Off by default.
+* **DNS Visibility**: The dashboard and API now count lookups that went out unencrypted (DoH fallback or DoH off) and flag DNS as degraded while the provider is unreachable.
+* **DNS Cache Fix**: Cached answers now report their remaining lifetime instead of the original one.
+* **Security**: The dashboard page itself is authenticated, not just the server behind it.
 
 ## Version 3.7
 * **Every Chipset**: TTL fixing no longer depends on Qualcomm `rmnet` interface names; MediaTek, Exynos, Tensor, Unisoc and 464XLAT (CLAT) connections are covered too.

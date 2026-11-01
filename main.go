@@ -148,6 +148,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Without fail-open a full queue drops packets, so a burst the daemon
+	// can't keep up with stalls every tethered connection.
+	if err := sendQueueFlags(fd, cfg.QueueNum, NFQA_CFG_F_FAIL_OPEN, NFQA_CFG_F_FAIL_OPEN); err != nil {
+		fmt.Fprintf(os.Stderr, "Enabling fail-open failed (continuing): %v\n", err)
+	}
+
 	fmt.Println("NFQUEUE initialized successfully. Running...")
 
 	ticker := time.NewTicker(3 * time.Second)

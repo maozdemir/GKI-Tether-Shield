@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"mime"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -169,13 +170,26 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(stats)
 }
 
-func indexHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if len(webUIHTML) > 0 {
-		_, _ = w.Write(webUIHTML)
-		return
+// indexHandler serves the dashboard. When the companion app sends a nonce,
+// the response carries a MAC over the exact page bytes (see pageMAC).
+func indexHandler(token string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		page := webUIHTML
+		if len(page) == 0 {
+			data, err := os.ReadFile(getWebrootFile())
+			if err != nil {
+				http.Error(w, "dashboard not found", http.StatusNotFound)
+				return
+			}
+			page = data
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		if nonce := r.Header.Get(pageNonceHeader); token != "" && validNonce(nonce) {
+			w.Header().Set(pageMACHeader, pageMAC(token, nonce, page))
+		}
+		_, _ = w.Write(page)
 	}
-	http.ServeFile(w, r, getWebrootFile())
 }
 
 func startHTTPServer() {
@@ -187,10 +201,9 @@ func startHTTPServer() {
 	auth := newWriteAuthorizer(token)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", requireTrustedLocal(indexHandler))
+	mux.HandleFunc("/", requireTrustedLocal(indexHandler(token)))
 	mux.HandleFunc("/api/stats", requireTrustedLocal(statsHandler))
 	mux.HandleFunc("/api/config", configHandler(getConfigPath, auth.allowed))
-	mux.HandleFunc("/api/hello", requireTrustedLocal(helloHandler(token)))
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", WEB_PORT),

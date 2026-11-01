@@ -9,7 +9,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -188,26 +187,25 @@ func createWebUIToken() (string, error) {
 	return loadOrCreateWebUIToken(filepath.Join(moduleDir(), webUITokenFile))
 }
 
-// helloHandler lets a client verify it is talking to the real daemon before
-// trusting the page on 127.0.0.1:64640. Another app could bind that port
-// while the daemon is down and serve a page inside the trusted companion
-// app; only the daemon knows the token, so only it can answer
-// HMAC-SHA256(token, "tshield-hello:" + nonce) for the client's fresh nonce.
-func helloHandler(token string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if token == "" {
-			writeJSONError(w, http.StatusServiceUnavailable, "no web UI token")
-			return
-		}
-		nonce := r.URL.Query().Get("nonce")
-		if decoded, err := hex.DecodeString(nonce); err != nil || len(decoded) < 16 || len(decoded) > 64 {
-			writeJSONError(w, http.StatusBadRequest, "nonce must be 16-64 random bytes, hex encoded")
-			return
-		}
-		mac := hmac.New(sha256.New, []byte(token))
-		mac.Write([]byte("tshield-hello:" + nonce))
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(map[string]string{"proof": hex.EncodeToString(mac.Sum(nil))})
-	}
+const (
+	pageNonceHeader = "X-Shield-Nonce"
+	pageMACHeader   = "X-Shield-Page-MAC"
+)
+
+// pageMAC authenticates the dashboard page for the companion app:
+// HMAC-SHA256(token, "tshield-page:" + nonce + ":" + page). Only the daemon
+// knows the per-boot token, so the app can tell the real page from one
+// served by another app that grabbed 127.0.0.1:64640, and the client's fresh
+// nonce prevents replaying an old response.
+func pageMAC(token, nonce string, page []byte) string {
+	mac := hmac.New(sha256.New, []byte(token))
+	mac.Write([]byte("tshield-page:" + nonce + ":"))
+	mac.Write(page)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// validNonce accepts 16-64 random bytes, hex encoded.
+func validNonce(nonce string) bool {
+	decoded, err := hex.DecodeString(nonce)
+	return err == nil && len(decoded) >= 16 && len(decoded) <= 64
 }

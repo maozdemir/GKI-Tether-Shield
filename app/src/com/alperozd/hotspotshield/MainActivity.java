@@ -13,19 +13,24 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.TextView;
+import java.io.ByteArrayInputStream;
+import java.util.Collections;
 
 /**
  * Zero-icon manager: shows the daemon's local dashboard in a WebView.
  *
- * <p>The daemon trusts this app (by UID) to change settings, so the app must
- * never show a page from anyone else: another app could bind 127.0.0.1:64640
- * while the daemon is down. Before every load the app checks that the server
- * proves knowledge of the per-boot token it was launched with (see
- * {@link DaemonVerifier}).
+ * <p>The daemon trusts this app (by UID) to change settings, so no page other
+ * than the daemon's own may ever run here: another app could bind
+ * 127.0.0.1:64640 while the daemon is down. Every main-frame load of the
+ * dashboard is fetched natively and only handed to the WebView if its MAC
+ * verifies against the per-boot token (see {@link PageVerifier}). The
+ * activity is not exported; only root (the module's action.sh) can start it
+ * and supply the token.
  */
 public class MainActivity extends Activity {
     static final String EXTRA_TOKEN = "token";
@@ -40,7 +45,6 @@ public class MainActivity extends Activity {
     private WebView webView;
     private String token;
     private int loadAttempts;
-    private boolean destroyed;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -70,39 +74,20 @@ public class MainActivity extends Activity {
 
         webView.setWebViewClient(new DashboardClient());
         setContentView(webView);
-        verifyThenLoad();
+        webView.loadUrl(DASHBOARD_URL);
     }
 
-    /** Loads the dashboard only after the real daemon has proven itself. */
-    private void verifyThenLoad() {
-        final String launchToken = token;
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                final boolean verified = DaemonVerifier.verify(launchToken);
-                handler.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        onVerified(verified);
-                    }
-                });
-            }
-        }, "daemon-verify").start();
-    }
-
-    private void onVerified(boolean verified) {
-        if (destroyed) {
-            return;
-        }
-        if (verified) {
-            webView.loadUrl(DASHBOARD_URL);
+    private void retryOrGiveUp() {
+        if (webView == null) {
             return;
         }
         if (++loadAttempts < MAX_LOAD_ATTEMPTS) {
             handler.postDelayed(new Runnable() {
                 @Override
                 public void run() {
-                    verifyThenLoad();
+                    if (webView != null) {
+                        webView.loadUrl(DASHBOARD_URL);
+                    }
                 }
             }, RETRY_DELAY_MS);
         } else {
@@ -147,10 +132,10 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        destroyed = true;
         handler.removeCallbacksAndMessages(null);
         if (webView != null) {
             webView.destroy();
+            webView = null;
         }
         super.onDestroy();
     }
@@ -164,11 +149,16 @@ public class MainActivity extends Activity {
         }
     }
 
-    private static boolean isDashboard(Uri uri) {
+    private static boolean isDashboardHost(Uri uri) {
         String host = uri.getHost();
         return "http".equals(uri.getScheme())
                 && ("127.0.0.1".equals(host) || "localhost".equals(host))
                 && uri.getPort() == DASHBOARD_PORT;
+    }
+
+    private static WebResourceResponse errorResponse(int status, String reason) {
+        return new WebResourceResponse("text/plain", "utf-8", status, reason,
+                Collections.<String, String>emptyMap(), new ByteArrayInputStream(new byte[0]));
     }
 
     /** Opens http(s) links (GitHub, releases) in the user's browser. */
@@ -188,23 +178,45 @@ public class MainActivity extends Activity {
         @Override
         public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
             Uri uri = request.getUrl();
-            if (isDashboard(uri)) {
+            if (isDashboardHost(uri)) {
                 return false;
             }
             openExternally(uri);
             return true;
         }
 
+        // Runs on a background thread for every request. Only main-frame page
+        // loads are taken over; the page's own fetch() calls go to the network
+        // as data (a swapped server could only feed it numbers, never code).
+        @Override
+        public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+            Uri uri = request.getUrl();
+            if (!request.isForMainFrame() || !isDashboardHost(uri)) {
+                return null;
+            }
+            String path = uri.getPath();
+            if (!"GET".equals(request.getMethod()) || !(path == null || path.isEmpty() || "/".equals(path))) {
+                return errorResponse(404, "Not Found");
+            }
+            byte[] page = PageVerifier.fetchVerifiedPage(DASHBOARD_URL, token);
+            if (page == null) {
+                return errorResponse(503, "Service Unavailable");
+            }
+            return new WebResourceResponse("text/html", "utf-8", 200, "OK",
+                    Collections.singletonMap("Cache-Control", "no-store"), new ByteArrayInputStream(page));
+        }
+
+        @Override
+        public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+            if (request.isForMainFrame() && response.getStatusCode() == 503) {
+                retryOrGiveUp();
+            }
+        }
+
         @Override
         public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-            // The daemon went away mid-load: re-verify before loading again.
-            if (request.isForMainFrame() && ++loadAttempts < MAX_LOAD_ATTEMPTS) {
-                handler.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        verifyThenLoad();
-                    }
-                }, RETRY_DELAY_MS);
+            if (request.isForMainFrame()) {
+                retryOrGiveUp();
             }
         }
     }

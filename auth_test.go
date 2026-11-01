@@ -139,39 +139,46 @@ func TestRequestUIDRealSocket(t *testing.T) {
 	}
 }
 
-func TestHelloHandlerProvesTokenKnowledge(t *testing.T) {
+func TestIndexHandlerAuthenticatesPage(t *testing.T) {
 	const token = "0123456789abcdef"
-	h := helloHandler(token)
-
+	h := indexHandler(token)
 	nonce := "00112233445566778899aabbccddeeff"
-	r := httptest.NewRequest(http.MethodGet, "/api/hello?nonce="+nonce, nil)
-	r.Host = "127.0.0.1:64640"
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set(pageNonceHeader, nonce)
 	w := httptest.NewRecorder()
 	h(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status %d", w.Code)
+	page := w.Body.Bytes()
+	if w.Code != http.StatusOK || len(page) == 0 {
+		t.Fatalf("status %d, %d bytes", w.Code, len(page))
 	}
 	mac := hmac.New(sha256.New, []byte(token))
-	mac.Write([]byte("tshield-hello:" + nonce))
-	want := hex.EncodeToString(mac.Sum(nil))
-	if !strings.Contains(w.Body.String(), `"proof":"`+want+`"`) {
-		t.Fatalf("body %q does not carry the expected proof", w.Body.String())
+	mac.Write([]byte("tshield-page:" + nonce + ":"))
+	mac.Write(page)
+	if got, want := w.Header().Get(pageMACHeader), hex.EncodeToString(mac.Sum(nil)); got != want {
+		t.Fatalf("page MAC = %q, want %q", got, want)
 	}
 
-	for _, bad := range []string{"", "xyz", "00", strings.Repeat("a", 200)} {
-		r := httptest.NewRequest(http.MethodGet, "/api/hello?nonce="+bad, nil)
-		r.Host = "127.0.0.1:64640"
+	// Browsers send no nonce and get no MAC; invalid nonces get none either.
+	for _, nonce := range []string{"", "xyz", "00", strings.Repeat("a", 200)} {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		if nonce != "" {
+			r.Header.Set(pageNonceHeader, nonce)
+		}
 		w := httptest.NewRecorder()
 		h(w, r)
-		if w.Code != http.StatusBadRequest {
-			t.Fatalf("nonce %q: status %d, want 400", bad, w.Code)
+		if w.Code != http.StatusOK || w.Header().Get(pageMACHeader) != "" {
+			t.Fatalf("nonce %q: status %d, MAC %q", nonce, w.Code, w.Header().Get(pageMACHeader))
 		}
 	}
 
+	// Without a token there is nothing to authenticate with.
+	r = httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set(pageNonceHeader, nonce)
 	w = httptest.NewRecorder()
-	helloHandler("")(w, httptest.NewRequest(http.MethodGet, "/api/hello?nonce="+nonce, nil))
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("without a token: status %d, want 503", w.Code)
+	indexHandler("")(w, r)
+	if w.Header().Get(pageMACHeader) != "" {
+		t.Fatal("no MAC must be produced without a token")
 	}
 }
 

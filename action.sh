@@ -37,12 +37,29 @@ fi
 URL="http://127.0.0.1:64640"
 BROWSER=$(pm resolve-activity -a android.intent.action.VIEW -d "$URL" 2>/dev/null | grep packageName | head -n1 | cut -d'=' -f2)
 
+# daemon_owns_dashboard: succeeds if 127.0.0.1:64640 (hex FC80) is listened
+# on, and only by root. If another app grabbed the port, its page would read
+# the token from the URL, so the browser must not get it.
+daemon_owns_dashboard() {
+    found=1
+    for table in ${PROC_NET_TCP_TABLES:-/proc/net/tcp /proc/net/tcp6}; do
+        [ -r "$table" ] || continue
+        while read -r _ local _ state _ _ _ uid _; do
+            case "$local" in *:FC80) ;; *) continue ;; esac
+            [ "$state" = 0A ] || continue   # 0A = LISTEN
+            [ "$uid" = 0 ] || return 1
+            found=0
+        done < "$table"
+    done
+    return $found
+}
+
 if [ -n "$BROWSER" ]; then
     # Saving needs the token (only the companion app is trusted by UID). It
-    # is only ever sent pinned to the resolved browser (-p), never as an open
-    # intent another app could receive, and the URL fragment never leaves the
-    # browser.
-    [ -n "$TOKEN" ] && URL="$URL/#token=$TOKEN"
+    # is only sent when the daemon really owns the port, pinned to the
+    # resolved browser (-p), never as an open intent another app could
+    # receive; the URL fragment never leaves the browser.
+    [ -n "$TOKEN" ] && daemon_owns_dashboard && URL="$URL/#token=$TOKEN"
     am start -a android.intent.action.VIEW -d "$URL" -p "$BROWSER" --user 0 -f 0x14000000 >/dev/null 2>&1
 else
     # No resolvable browser: open the read-only dashboard without a token.

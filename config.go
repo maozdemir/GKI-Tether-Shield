@@ -95,7 +95,7 @@ func loadConfig(path string) {
 				cfg.DohProvider = strings.ToLower(v)
 			}
 		case "QUEUE_NUM":
-			if val, err := strconv.Atoi(v); err == nil && val > 0 && val < 65535 {
+			if val, err := strconv.Atoi(v); err == nil && val > 0 && val <= 65535-NUM_QUEUES {
 				cfg.QueueNum = uint16(val)
 			}
 		}

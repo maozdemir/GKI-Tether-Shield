@@ -52,10 +52,17 @@ iptables -t mangle -X nfqttli 2>/dev/null
 # 1) Intercept ports 80, 443 for GoodbyeDPI / TLS SNI splitting
 # 2) Intercept non-64 TTL packets for real-time TTL normalization
 # 3) Completely bypass BitTorrent, gaming UDP, and bulk file downloads
+# Packets are spread over 4 queues (6464-6467, one daemon worker per queue,
+# NUM_QUEUES in nfqueue.go) by flow hash, so per-flow ordering is preserved.
+# Falls back to a single queue if --queue-balance is unsupported.
+QUEUE_TARGET="--queue-balance 6464:6467 --queue-bypass"
 iptables -t mangle -N nfqttlo 2>/dev/null
 iptables -t mangle -F nfqttlo
-iptables -t mangle -A nfqttlo -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 6464 --queue-bypass
-iptables -t mangle -A nfqttlo -m ttl ! --ttl-eq 64 -j NFQUEUE --queue-num 6464 --queue-bypass
+if ! iptables -t mangle -A nfqttlo -m ttl ! --ttl-eq 64 -j NFQUEUE $QUEUE_TARGET 2>/dev/null; then
+    QUEUE_TARGET="--queue-num 6464 --queue-bypass"
+    iptables -t mangle -A nfqttlo -m ttl ! --ttl-eq 64 -j NFQUEUE $QUEUE_TARGET
+fi
+iptables -t mangle -I nfqttlo 1 -p tcp -m multiport --dports 80,443 -j NFQUEUE $QUEUE_TARGET
 
 # Apply in POSTROUTING on outgoing WAN (cellular) interfaces
 iptables -t mangle -C POSTROUTING -o rmnet+ -j nfqttlo 2>/dev/null || iptables -t mangle -A POSTROUTING -o rmnet+ -j nfqttlo

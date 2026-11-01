@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 )
 
@@ -51,4 +52,51 @@ func TestBuildQueueFlagsMessage(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Fatalf("flags message mismatch\n got % x\nwant % x", got, want)
 	}
+}
+
+// buildPacketMsg mimics a kernel NFQNL_MSG_PACKET message.
+func buildPacketMsg(packetID uint32, payload []byte) []byte {
+	hdr := binary.BigEndian.AppendUint32(nil, packetID)
+	hdr = append(hdr, 0x08, 0x00, 4) // hw_protocol (IPv4), hook
+	msg := buildNfqMsg(NFQNL_MSG_PACKET, 6464,
+		nlAttr{NFQA_PACKET_HDR, hdr},
+		nlAttr{NFQA_PAYLOAD, payload},
+	)
+	return msg
+}
+
+func TestParseNfqMessages(t *testing.T) {
+	buf := append(buildPacketMsg(1, []byte{0x45, 1, 2}), buildPacketMsg(2, []byte{0x60})...)
+	var ids []uint32
+	var payloads [][]byte
+	parseNfqMessages(buf, func(id uint32, payload []byte) {
+		ids = append(ids, id)
+		payloads = append(payloads, payload)
+	})
+	if len(ids) != 2 || ids[0] != 1 || ids[1] != 2 {
+		t.Fatalf("ids = %v, want [1 2]", ids)
+	}
+	if !bytes.Equal(payloads[0], []byte{0x45, 1, 2}) || !bytes.Equal(payloads[1], []byte{0x60}) {
+		t.Fatalf("payloads = % x", payloads)
+	}
+}
+
+func TestParseNfqMessagesIgnoresNonPacketAndTruncated(t *testing.T) {
+	calls := 0
+	onPacket := func(uint32, []byte) { calls++ }
+	parseNfqMessages(buildVerdictMsg(6464, 1, NF_ACCEPT, nil), onPacket)
+	full := buildPacketMsg(3, []byte{0x45})
+	for cut := 0; cut < len(full); cut++ {
+		parseNfqMessages(full[:cut], onPacket)
+	}
+	if calls != 0 {
+		t.Fatalf("expected no packets from non-packet/truncated input, got %d", calls)
+	}
+}
+
+func FuzzParseNfqMessages(f *testing.F) {
+	f.Add(buildPacketMsg(1, []byte{0x45, 0, 0, 20}))
+	f.Fuzz(func(t *testing.T, buf []byte) {
+		parseNfqMessages(buf, func(uint32, []byte) {})
+	})
 }

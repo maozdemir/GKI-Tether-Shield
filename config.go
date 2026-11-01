@@ -33,13 +33,6 @@ func getWebrootFile() string {
 	return filepath.Join(moduleDir(), "webroot", "index.html")
 }
 
-// getStatsPath keeps stats in the root-only module dir. The old location,
-// /data/local/tmp, is writable by the adb shell user, who could plant a
-// symlink there and have the root daemon overwrite any file.
-func getStatsPath() string {
-	return filepath.Join(moduleDir(), "stats.json")
-}
-
 type Config struct {
 	QueueNum          uint16 `json:"QUEUE_NUM"`
 	TargetTTL         uint8  `json:"TARGET_TTL"`

@@ -3,11 +3,14 @@
 package main
 
 import (
+	"bytes"
 	_ "embed"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/signal"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -56,49 +59,42 @@ var (
 	dnsCacheHits uint64
 )
 
-func writeStats() {
-	c := cfgSnapshot()
-	jsonContent := fmt.Sprintf(`{
-  "total_packets": %d,
-  "ipv4_packets": %d,
-  "ipv6_packets": %d,
-  "ttl_modified": %d,
-  "tcp_split_packets": %d,
-  "doh_queries": %d,
-  "dns_cache_hits": %d,
-  "target_ttl": %d,
-  "tcp_split_enabled": %v,
-  "doh_enabled": %v,
-  "doh_provider": "%s",
-  "updated_at": "%s"
-}`,
-		atomic.LoadUint64(&totalPackets),
-		atomic.LoadUint64(&ipv4Packets),
-		atomic.LoadUint64(&ipv6Packets),
-		atomic.LoadUint64(&ttlModified),
-		atomic.LoadUint64(&tcpSplitPkts),
-		atomic.LoadUint64(&dohQueries),
-		atomic.LoadUint64(&dnsCacheHits),
-		c.TargetTTL,
-		c.TcpSplit,
-		c.DohEnabled,
-		c.DohProvider,
-		time.Now().Format(time.RFC3339),
-	)
-	if err := writeFileAtomic(getStatsPath(), []byte(jsonContent), 0o644); err != nil {
-		logf("write stats: %v", err)
+// fetchStatus queries the running daemon's stats API and returns them
+// pretty-printed. The CLI runs as root, which the API trusts.
+func fetchStatus(url string) (string, error) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("daemon not reachable: %w", err)
 	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("daemon returned HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return "", fmt.Errorf("read status: %w", err)
+	}
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, body, "", "  "); err != nil {
+		return "", fmt.Errorf("decode status: %w", err)
+	}
+	return pretty.String(), nil
+}
+
+func runStatusCommand() {
+	out, err := fetchStatus(fmt.Sprintf("http://127.0.0.1:%d/api/stats", WEB_PORT))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v (is the daemon running?)\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(out)
 }
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "status" || os.Args[1] == "-status" || os.Args[1] == "--status") {
-		data, err := os.ReadFile(getStatsPath())
-		if err != nil {
-			fmt.Println("No stats available. Is the daemon running?")
-			os.Exit(1)
-		}
-		fmt.Println(string(data))
-		os.Exit(0)
+		runStatusCommand()
+		return
 	}
 
 	_ = syscall.Setpriority(syscall.PRIO_PROCESS, 0, -20)
@@ -130,13 +126,6 @@ func main() {
 	}
 	logf("NFQUEUE initialized on queues %d-%d", startCfg.QueueNum, startCfg.QueueNum+NUM_QUEUES-1)
 
-	ticker := time.NewTicker(3 * time.Second)
-	go func() {
-		for range ticker.C {
-			writeStats()
-		}
-	}()
-
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
@@ -146,7 +135,6 @@ func main() {
 				reloadConfig()
 				continue
 			}
-			writeStats()
 			closeQueues(queues)
 			os.Exit(0)
 		}

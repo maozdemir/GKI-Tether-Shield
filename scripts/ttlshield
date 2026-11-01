@@ -2,14 +2,25 @@
 MODDIR="/data/adb/modules/gki_hotspot_shield"
 [ -d "$MODDIR" ] || MODDIR="$(dirname "$0")/.."
 
-if [ "$1" = "" ] || [ "$1" = "status" ] || [ "$1" = "-s" ]; then
-    "$MODDIR/tether_shield" status
-elif [ "$1" = "log" ] || [ "$1" = "-l" ]; then
-    cat "$MODDIR/stats.json"
-elif [ "$1" = "restart" ] || [ "$1" = "-r" ]; then
-    killall -9 tether_shield 2>/dev/null
-    nohup "$MODDIR/tether_shield" </dev/null >/dev/null 2>&1 &
-    echo "GKI-Tether-Shield daemon restarted."
-else
-    "$MODDIR/tether_shield" "$@"
-fi
+case "$1" in
+    ""|status|-s)
+        # Live counters straight from the running daemon.
+        "$MODDIR/tether_shield" status
+        ;;
+    log|-l)
+        tail -n "${2:-50}" "$MODDIR/daemon.log" 2>/dev/null || echo "No log yet."
+        if [ -s "$MODDIR/daemon.stderr" ]; then
+            echo "--- last crash output (daemon.stderr) ---"
+            tail -n 30 "$MODDIR/daemon.stderr"
+        fi
+        ;;
+    restart|-r)
+        killall tether_shield 2>/dev/null   # SIGTERM: queues unbind cleanly
+        sleep 1
+        nohup "$MODDIR/tether_shield" </dev/null >"$MODDIR/daemon.stderr" 2>&1 &
+        echo "GKI-Tether-Shield daemon restarted."
+        ;;
+    *)
+        "$MODDIR/tether_shield" "$@"
+        ;;
+esac

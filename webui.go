@@ -1,0 +1,192 @@
+//go:build linux
+
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"mime"
+	"net/http"
+	"os"
+	"strings"
+	"sync/atomic"
+	"time"
+)
+
+const maxConfigBodyBytes = 4096
+
+var trustedWebHosts = map[string]bool{
+	fmt.Sprintf("127.0.0.1:%d", WEB_PORT): true,
+	fmt.Sprintf("localhost:%d", WEB_PORT): true,
+}
+
+// isTrustedLocalRequest blocks DNS rebinding (Host must be our loopback
+// address) and cross-site requests from web pages (Origin, when a browser
+// sends one, must be our own origin). It cannot stop a local app that forges
+// both headers; that needs per-UID authentication.
+func isTrustedLocalRequest(r *http.Request) bool {
+	if !trustedWebHosts[r.Host] {
+		return false
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	host, ok := strings.CutPrefix(origin, "http://")
+	return ok && trustedWebHosts[host]
+}
+
+func requireTrustedLocal(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !isTrustedLocalRequest(r) {
+			writeJSONError(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		next(w, r)
+	}
+}
+
+func parseBoolValue(v any) bool {
+	return v == "1" || v == true || v == "true"
+}
+
+// applyConfigUpdate returns a copy of base with the update applied. Numeric
+// values out of range are ignored (as before); an unknown DoH provider rejects
+// the whole update so arbitrary text can never reach the config file.
+func applyConfigUpdate(base Config, update map[string]any) (Config, error) {
+	next := base
+	if f, ok := update["TARGET_TTL"].(float64); ok && f > 0 && f <= 255 {
+		next.TargetTTL = uint8(f)
+	}
+	if f, ok := update["SPLIT_POS"].(float64); ok && f > 0 && f < 100 {
+		next.SplitPos = int(f)
+	}
+	boolFields := map[string]*bool{
+		"TCP_SPLIT":            &next.TcpSplit,
+		"BUFFERBLOAT_QOS":      &next.BufferbloatQoS,
+		"WIFI_POWER_SAVE_LOCK": &next.WifiPowerSaveLock,
+		"TCP_LOW_LATENCY":      &next.TcpLowLatency,
+		"DOH_ENABLED":          &next.DohEnabled,
+	}
+	for key, field := range boolFields {
+		if v, ok := update[key]; ok {
+			*field = parseBoolValue(v)
+		}
+	}
+	if v, ok := update["DOH_PROVIDER"]; ok {
+		name, _ := v.(string)
+		if _, known := lookupDoHProvider(name); !known {
+			return base, fmt.Errorf("unknown DOH_PROVIDER %q", name)
+		}
+		next.DohProvider = strings.ToLower(strings.TrimSpace(name))
+	}
+	return next, nil
+}
+
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func handleConfigPost(w http.ResponseWriter, r *http.Request, configPath func() string) {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		// Requiring JSON forces a CORS preflight for cross-origin fetches,
+		// which this server never answers.
+		writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return
+	}
+	var update map[string]any
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxConfigBodyBytes))
+	if err := dec.Decode(&update); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	next, err := applyConfigUpdate(cfg, update)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := saveConfigToFile(configPath(), next); err != nil {
+		fmt.Fprintf(os.Stderr, "save config: %v\n", err)
+		writeJSONError(w, http.StatusInternalServerError, "failed to save config")
+		return
+	}
+	cfg = next
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+func configHandler(configPath func() string) http.HandlerFunc {
+	return requireTrustedLocal(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(cfg)
+		case http.MethodPost:
+			handleConfigPost(w, r, configPath)
+		default:
+			w.Header().Set("Allow", "GET, POST")
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	})
+}
+
+func statsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	stats := map[string]any{
+		"total_packets":     atomic.LoadUint64(&totalPackets),
+		"ipv4_packets":      atomic.LoadUint64(&ipv4Packets),
+		"ipv6_packets":      atomic.LoadUint64(&ipv6Packets),
+		"ttl_modified":      atomic.LoadUint64(&ttlModified),
+		"tcp_split_packets": atomic.LoadUint64(&tcpSplitPkts),
+		"doh_queries":       atomic.LoadUint64(&dohQueries),
+		"dns_cache_hits":    atomic.LoadUint64(&dnsCacheHits),
+		"target_ttl":        cfg.TargetTTL,
+		"tcp_split_enabled": cfg.TcpSplit,
+		"doh_enabled":       cfg.DohEnabled,
+		"doh_provider":      cfg.DohProvider,
+		"version":           MODULE_VERSION,
+		"version_code":      MODULE_VERSION_CODE,
+		"updated_at":        time.Now().Format(time.RFC3339),
+	}
+	_ = json.NewEncoder(w).Encode(stats)
+}
+
+func indexHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if len(webUIHTML) > 0 {
+		_, _ = w.Write(webUIHTML)
+		return
+	}
+	http.ServeFile(w, r, getWebrootFile())
+}
+
+func startHTTPServer() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", requireTrustedLocal(indexHandler))
+	mux.HandleFunc("/api/stats", requireTrustedLocal(statsHandler))
+	mux.HandleFunc("/api/config", configHandler(getConfigPath))
+
+	srv := &http.Server{
+		Addr:              fmt.Sprintf("127.0.0.1:%d", WEB_PORT),
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 * 1024,
+	}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil {
+			fmt.Fprintf(os.Stderr, "web UI server stopped: %v\n", err)
+		}
+	}()
+}

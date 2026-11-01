@@ -55,9 +55,14 @@ jobs:
           echo "$CHANGELOG" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
+      - name: Vet and test
+        run: |
+          go vet .
+          go test -race .
+
       - name: Build arm64 binary
         run: |
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o nfqttl main.go
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o nfqttl .
 
       - name: Sync update.json and changelog.md
         run: |

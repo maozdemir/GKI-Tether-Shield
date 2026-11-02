@@ -44,7 +44,7 @@ Furthermore, legacy C-based modules relied on inspecting standard Linux routing 
 
 Lastly, legacy userspace daemons ran a single-threaded queue and modified payloads indiscriminately, throttling high-speed 5G tethering and corrupting BitTorrent/P2P transfers.
 
-**GKI-Tether-Shield** solves this without custom kernel builds: iptables only *selects* packets (`-m ttl` / `-m hl` matches, which GKI still ships) and hands them to NFQUEUE, where a multi-core Go daemon rewrites TTL / Hop Limit and fixes checksums.
+**GKI-Tether-Shield** solves this without custom kernel builds: iptables only *selects* packets (`-m ttl` / `-m hl` matches, which GKI still ships) and hands them to NFQUEUE, where a multi-core Go daemon rewrites TTL / Hop Limit and fixes checksums. Since v4.0 it can instead rewrite them in the kernel itself with a small eBPF program (`TTL_ENGINE=ebpf`), which also catches hotspot traffic that Android's tethering offload sends past iptables.
 
 ---
 
@@ -57,7 +57,8 @@ Lastly, legacy userspace daemons ran a single-threaded queue and modified payloa
 | **DNS Privacy & Hijacking** | ISP snoops, hijacks, or poisons unencrypted port 53 DNS | **Encrypted, certificate-verified** DNS-over-HTTPS for IPv4 and IPv6 clients (Cloudflare / Quad9 / Google / AdGuard) |
 | **Bufferbloat / Gaming Ping** | Ping spikes to 300+ ms when someone streams video | **Flat 20-30 ms ping** under load via Fair Queueing (`fq_codel` QoS) |
 | **Wi-Fi Latency (Screen Off)** | High jitter and packet drops caused by Wi-Fi power saving | **Locked to low latency** during active hotspot; powersave restored on idle |
-| **BitTorrent & P2P Speed** | Stalls or drops due to userspace queue saturation | Payload never touched (only TTL); **4 parallel queue workers** with fail-open queues and an enlarged conntrack table |
+| **BitTorrent & P2P Speed** | Stalls or drops due to userspace queue saturation | Payload never touched (only TTL); **4 parallel queue workers** with fail-open queues and an enlarged conntrack table, or **in-kernel eBPF** TTL fixing with no userspace round trip |
+| **Tethering Offload** | Offloaded hotspot packets skip iptables, so their TTL leaks | **Fixed in the kernel** by the eBPF engine, after Android's offload has forwarded them |
 | **Chipset Support** | Hardcoded to Qualcomm `rmnet` interfaces | **Any modem** (Qualcomm, MediaTek, Exynos, Tensor, Unisoc, 464XLAT/CLAT): rules key off downstream interfaces, not modem names |
 | **Configuration Interface** | Complex terminal commands or clunky drawer apps | **Zero-Icon Native Manager App** launched directly via Magisk Action button |
 | **Module Updates** | Manual downloading from GitHub & flashing | **1-Click Native Auto-Update** directly in Magisk / KernelSU / APatch / MMRL; your settings are kept |
@@ -72,7 +73,12 @@ Lastly, legacy userspace daemons ran a single-threaded queue and modified payloa
 - Packets are spread over **4 NFQUEUE workers** by flow hash (multi-core, per-flow order preserved), with **fail-open** queues: if the daemon falls behind, packets pass instead of being dropped.
 - **Works on every SoC:** instead of guessing the modem's interface name (`rmnet*`, `ccmni*`, `seth_lte*`, `v4-*` CLAT, ...), every egress interface except known hotspot/USB/Ethernet downstreams is treated as upstream.
 - Recalculates IPv4 header checksums; a watchdog restarts the daemon if it ever stops.
-- **Optional in-kernel engine (`TTL_ENGINE=ebpf`, experimental):** a small eBPF program on each upstream interface's tc egress hook rewrites TTL / hop limit in the kernel, with no copy to userspace; only the first packets of web connections still go to the daemon for DPI splitting. It coexists with Android's own tc programs (netd, clatd), follows interfaces as they appear, and falls back to NFQUEUE automatically if the kernel or SELinux refuses it; the dashboard shows which engine is running and why.
+- **In-kernel eBPF engine (`TTL_ENGINE=ebpf`, opt-in):** a small eBPF program on each upstream interface's tc egress hook rewrites TTL / hop limit in the kernel, with no copy to userspace; only the first packets of web connections still go to the daemon for DPI splitting.
+  - **Faster and lighter:** forwarded traffic no longer makes a round trip through the daemon, which saves CPU and battery on fast hotspot connections.
+  - **Covers offloaded hotspot traffic:** Android's tethering BPF offload forwards hotspot packets straight to the mobile interface with `bpf_redirect()`, skipping iptables (and so NFQUEUE). Those packets still pass the tc egress hook, so the eBPF engine fixes them too.
+  - **Safe alongside Android:** it never drops or redirects packets, so Android's own tc programs (netd, clatd, tethering offload) keep working; it follows interfaces as they appear and re-attaches if Android resets them.
+  - **Automatic fallback:** if the kernel or SELinux refuses it, the daemon logs why and keeps using NFQUEUE; the dashboard shows which engine is running and why. Switching back keeps the eBPF program attached until the NFQUEUE rules are restored, so TTL fixing never pauses.
+  - **Verified** on a Magisk phone with Android 16 and a 6.12 GKI kernel (SELinux enforcing), on the live mobile connection and with the offload path rebuilt in tests. NFQUEUE stays the default until it has been confirmed on more devices.
 
 ### 2. 🛡️ GoodbyeDPI / Zapret TLS ClientHello TCP Segmentation
 - Inspects initial HTTPS TLS ClientHello (SNI) and HTTP cleartext requests.
@@ -220,6 +226,11 @@ The TTL is rewritten on packets *leaving* the phone, so a `ping` from a client c
   su -c 'tcpdump -ni any -v -c 20 "icmp or tcp port 443"'
   ```
   *Result:* packets leaving on the mobile interface show `ttl 64` (`hlim 64` for IPv6), even for Windows clients (default `128`).
+* **eBPF engine:** with `TTL_ENGINE=ebpf`, the dashboard's TTL engine note says "eBPF is running", and each mobile interface lists the program:
+  ```bash
+  su -c 'tc filter show dev rmnet_data0 egress'   # use your mobile interface name
+  ```
+  *Result:* a line with `tshield_ttl`. If the note says eBPF wasn't allowed, the reason is shown there and in `ttlshield log`, and NFQUEUE keeps fixing TTL.
 
 ### 2. Verify Encrypted DNS (DoH)
 * Visit [BrowserLeaks DNS Leak Test](https://browserleaks.com/dns) on your tethered device.
@@ -244,14 +255,21 @@ Example output:
   "tcp_split_packets": 312,
   "doh_queries": 84,
   "dns_cache_hits": 29,
+  "dns_fallback_queries": 0,
+  "dns_plain_queries": 0,
   "target_ttl": 64,
+  "ttl_engine": "ebpf",
+  "ttl_engine_setting": "ebpf",
+  "ttl_engine_error": "",
   "tcp_split_enabled": true,
+  "block_quic": false,
   "doh_enabled": true,
   "doh_provider": "cloudflare",
-  "version": "v3.7",
-  "version_code": 370
+  "version": "v4.0",
+  "version_code": 400
 }
 ```
+`ttl_engine` is the engine actually running; it differs from `ttl_engine_setting` only when eBPF was refused, and `ttl_engine_error` then says why. (Trimmed: the full output also has `bufferbloat_qos`, `dns_last_fallback` and `updated_at`.)
 
 ---
 
@@ -281,7 +299,14 @@ By design, the companion app omits launcher intent categories to keep your home 
 <details>
 <summary><b>Will this affect online gaming ping or BitTorrent downloads?</b></summary>
 <p>
-BitTorrent and gaming payloads are never modified: only web ports (80, 443, 8080, 8443) are subject to TCP segmentation. Like all tethered traffic, their packets do pass through the daemon so their TTL can be fixed (GKI has no in-kernel TTL target); this is spread over 4 CPU cores and fails open under overload. The built-in <code>fq_codel</code> queue discipline stabilizes ping by eliminating bufferbloat.
+BitTorrent and gaming payloads are never modified: only web connections (ports 80 and 443) are subject to TCP segmentation. With the default NFQUEUE engine, their packets do pass through the daemon so their TTL can be fixed (GKI has no in-kernel TTL target); this is spread over 4 CPU cores and fails open under overload. With <code>TTL_ENGINE=ebpf</code> they never leave the kernel: the TTL is fixed in place. The built-in <code>fq_codel</code> queue discipline stabilizes ping by eliminating bufferbloat.
+</p>
+</details>
+
+<details>
+<summary><b>Which TTL engine should I use, NFQUEUE or eBPF?</b></summary>
+<p>
+NFQUEUE (the default) works on every phone. eBPF is faster and lighter on the battery, and it also fixes hotspot traffic that Android's tethering offload sends past iptables. Try it with <code>TTL_ENGINE=ebpf</code> (or the TTL engine switch in the dashboard). If your phone doesn't allow it, nothing breaks: the shield keeps using NFQUEUE and the dashboard tells you why. Switch back at any time; TTL fixing never pauses during the switch.
 </p>
 </details>
 
@@ -295,7 +320,7 @@ The embedded DNS proxy falls back to standard UDP resolution via <code>1.1.1.1:5
 <details>
 <summary><b>What kernels and Android versions are supported?</b></summary>
 <p>
-All Generic Kernel Image (GKI) kernels (5.4, 5.10, 5.15, 6.1, 6.6, 6.12+) running Android 12, 13, 14, 15, and 16. Non-GKI kernels work too if they provide Netfilter Queues (<code>CONFIG_NETFILTER_NETLINK_QUEUE</code>, the <code>NFQUEUE</code> target) and the <code>ttl</code>/<code>hl</code> matches (<code>CONFIG_NETFILTER_XT_MATCH_HL</code>).
+All Generic Kernel Image (GKI) kernels (5.4, 5.10, 5.15, 6.1, 6.6, 6.12+) running Android 12, 13, 14, 15, and 16. Non-GKI kernels work too if they provide Netfilter Queues (<code>CONFIG_NETFILTER_NETLINK_QUEUE</code>, the <code>NFQUEUE</code> target) and the <code>ttl</code>/<code>hl</code> matches (<code>CONFIG_NETFILTER_XT_MATCH_HL</code>). The eBPF engine additionally needs BPF tc classifiers (<code>CONFIG_NET_CLS_BPF</code>, <code>CONFIG_NET_SCH_INGRESS</code>), which every GKI kernel has because Android itself relies on them.
 </p>
 </details>
 

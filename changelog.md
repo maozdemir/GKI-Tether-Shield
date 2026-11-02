@@ -1,5 +1,11 @@
 # 🛡️ GKI-Tether-Shield Changelog
 
+## Version 4.0
+* **In-Kernel TTL Engine (eBPF)**: New `TTL_ENGINE=ebpf` option (or the TTL engine switch in the dashboard). A small eBPF program fixes TTL / hop limit inside the kernel on every mobile-data interface, so forwarded traffic no longer makes a round trip through the daemon: faster, and easier on the CPU and battery when sharing a fast connection. Off by default; NFQUEUE stays the default.
+* **Offloaded Hotspot Traffic Covered**: Android's tethering offload sends hotspot packets past iptables, so NFQUEUE never sees them. The eBPF engine fixes their TTL too.
+* **Safe Fallback**: If your phone doesn't allow eBPF, the shield keeps using NFQUEUE and the dashboard shows why. Switching engines never leaves a gap in TTL fixing.
+* **Splitting Unchanged**: Web handshake splitting still runs in the daemon; with eBPF on, only those first packets of each web connection go through it.
+
 ## Version 3.8
 * **WebUI Button Fixed**: The KernelSU / APatch / MMRL WebUI button now shows live stats and saves settings (it previously could not reach the service).
 * **Companion App Rebuilt**: Built from source; it now verifies it is talking to the real service before showing anything, pauses when in the background, opens links in your browser, and only uses plain HTTP for the local dashboard. Updates reinstall it automatically if needed.

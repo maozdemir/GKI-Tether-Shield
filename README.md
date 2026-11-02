@@ -73,12 +73,13 @@ Lastly, legacy userspace daemons ran a single-threaded queue and modified payloa
 - Packets are spread over **4 NFQUEUE workers** by flow hash (multi-core, per-flow order preserved), with **fail-open** queues: if the daemon falls behind, packets pass instead of being dropped.
 - **Works on every SoC:** instead of guessing the modem's interface name (`rmnet*`, `ccmni*`, `seth_lte*`, `v4-*` CLAT, ...), every egress interface except known hotspot/USB/Ethernet downstreams is treated as upstream.
 - Recalculates IPv4 header checksums; a watchdog restarts the daemon if it ever stops.
-- **In-kernel eBPF engine (`TTL_ENGINE=ebpf`, opt-in):** a small eBPF program on each upstream interface's tc egress hook rewrites TTL / hop limit in the kernel, with no copy to userspace; only the first packets of web connections still go to the daemon for DPI splitting.
+- **In-kernel eBPF engine (`TTL_ENGINE=ebpf`, chosen at install):** a small eBPF program on each upstream interface's tc egress hook rewrites TTL / hop limit in the kernel, with no copy to userspace; only the first packets of web connections still go to the daemon for DPI splitting.
   - **Faster and lighter:** forwarded traffic no longer makes a round trip through the daemon, which saves CPU and battery on fast hotspot connections.
   - **Covers offloaded hotspot traffic:** Android's tethering BPF offload forwards hotspot packets straight to the mobile interface with `bpf_redirect()`, skipping iptables (and so NFQUEUE). Those packets still pass the tc egress hook, so the eBPF engine fixes them too.
   - **Safe alongside Android:** it never drops or redirects packets, so Android's own tc programs (netd, clatd, tethering offload) keep working; it follows interfaces as they appear and re-attaches if Android resets them.
   - **Automatic fallback:** if the kernel or SELinux refuses it, the daemon logs why and keeps using NFQUEUE; the dashboard shows which engine is running and why. Switching back keeps the eBPF program attached until the NFQUEUE rules are restored, so TTL fixing never pauses.
-  - **Verified** on a Magisk phone with Android 16 and a 6.12 GKI kernel (SELinux enforcing), on the live mobile connection and with the offload path rebuilt in tests. NFQUEUE stays the default until it has been confirmed on more devices.
+  - **Verified** on a Magisk phone with Android 16 and a 6.12 GKI kernel (SELinux enforcing), on the live mobile connection and with the offload path rebuilt in tests.
+  - **Tested on your phone at install:** every install and update runs a quick self-test (`tether_shield ebpf-selftest`). It loads the program, checks it rewrites IPv4 and IPv6 test packets in the kernel, and attaches it to a throwaway virtual interface pair in a separate network namespace, never touching the real network. The installer then sets `TTL_ENGINE=ebpf` if it passed, or `nfqueue` with the reason if not.
 
 ### 2. 🛡️ GoodbyeDPI / Zapret TLS ClientHello TCP Segmentation
 - Inspects initial HTTPS TLS ClientHello (SNI) and HTTP cleartext requests.
@@ -152,6 +153,7 @@ GKI-Tether-Shield includes a modern configuration interface designed to never cl
   su -c ttlshield restart    # Restart the background daemon
   su -c "ttlshield config get"                       # Current settings as JSON
   su -c "ttlshield config set '{\"DOH_PROVIDER\":\"quad9\"}'"  # Change settings (same as the WebUI)
+  su -c "ttlshield ebpf-selftest"   # Can this phone run the eBPF TTL engine? ("ok" or the reason)
   ```
 
 ---
@@ -168,7 +170,9 @@ Settings can be changed in the **In-App Manager** / **WebUI**, or by editing `/d
 # Target TTL & Hop Limit (Default: 64, range 1-255)
 TARGET_TTL=64
 # How TTL is rewritten: nfqueue (userspace, works everywhere) or ebpf
-# (in-kernel, faster; falls back to nfqueue if the kernel refuses it)
+# (in-kernel, faster; falls back to nfqueue if the kernel refuses it).
+# Every install and update tests this phone and sets it: ebpf if the test
+# passes, nfqueue if not. You can change it until the next update.
 TTL_ENGINE=nfqueue
 
 # DPI Evasion / TCP Segmentation (Zapret / GoodbyeDPI mode)
@@ -299,14 +303,14 @@ By design, the companion app omits launcher intent categories to keep your home 
 <details>
 <summary><b>Will this affect online gaming ping or BitTorrent downloads?</b></summary>
 <p>
-BitTorrent and gaming payloads are never modified: only web connections (ports 80 and 443) are subject to TCP segmentation. With the default NFQUEUE engine, their packets do pass through the daemon so their TTL can be fixed (GKI has no in-kernel TTL target); this is spread over 4 CPU cores and fails open under overload. With <code>TTL_ENGINE=ebpf</code> they never leave the kernel: the TTL is fixed in place. The built-in <code>fq_codel</code> queue discipline stabilizes ping by eliminating bufferbloat.
+BitTorrent and gaming payloads are never modified: only web connections (ports 80 and 443) are subject to TCP segmentation. With the NFQUEUE engine, their packets do pass through the daemon so their TTL can be fixed (GKI has no in-kernel TTL target); this is spread over 4 CPU cores and fails open under overload. With <code>TTL_ENGINE=ebpf</code> they never leave the kernel: the TTL is fixed in place. The built-in <code>fq_codel</code> queue discipline stabilizes ping by eliminating bufferbloat.
 </p>
 </details>
 
 <details>
 <summary><b>Which TTL engine should I use, NFQUEUE or eBPF?</b></summary>
 <p>
-NFQUEUE (the default) works on every phone. eBPF is faster and lighter on the battery, and it also fixes hotspot traffic that Android's tethering offload sends past iptables. Try it with <code>TTL_ENGINE=ebpf</code> (or the TTL engine switch in the dashboard). If your phone doesn't allow it, nothing breaks: the shield keeps using NFQUEUE and the dashboard tells you why. Switch back at any time; TTL fixing never pauses during the switch.
+You usually don't have to choose: every install and update tests your phone and picks eBPF if it works there, NFQUEUE if not (the installer log says which and why). eBPF is faster and lighter on the battery, and it also fixes hotspot traffic that Android's tethering offload sends past iptables. NFQUEUE works on every phone. You can switch with <code>TTL_ENGINE</code> or the TTL engine switch in the dashboard; the next update tests and chooses again. If eBPF stops working later, nothing breaks: the shield falls back to NFQUEUE and the dashboard tells you why. TTL fixing never pauses during a switch.
 </p>
 </details>
 

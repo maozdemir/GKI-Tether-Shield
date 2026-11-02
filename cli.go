@@ -19,6 +19,7 @@ import (
 //	tether_shield status              live counters and settings
 //	tether_shield config get          current config as JSON
 //	tether_shield config set '<json>' apply a config update (same as the WebUI)
+//	tether_shield ebpf-selftest       can this phone run the eBPF TTL engine?
 
 const cliTimeout = 3 * time.Second
 
@@ -46,6 +47,8 @@ func runCLI(args []string, apiBase string, stdout, stderr io.Writer) (code int, 
 	case args[0] == "config":
 		fmt.Fprintln(stderr, "usage: tether_shield config get | config set '<json>'")
 		return 2, true
+	case args[0] == "ebpf-selftest":
+		return runSelfTestCLI(stdout, stderr), true
 	}
 	return 0, false
 }

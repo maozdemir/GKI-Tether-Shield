@@ -22,6 +22,30 @@ if [ -f "$OLD_CONF" ] && [ "$OLD_CONF" != "$MODPATH/config.conf" ]; then
     set_perm "$MODPATH/config.conf" 0 0 0644
 fi
 
+# set_conf KEY VALUE: set KEY in the new config.conf, adding it if missing.
+set_conf() {
+    if grep -q "^$1=" "$MODPATH/config.conf"; then
+        sed -i "s/^$1=.*/$1=$2/" "$MODPATH/config.conf"
+    else
+        [ -z "$(tail -c 1 "$MODPATH/config.conf")" ] || echo >> "$MODPATH/config.conf"
+        echo "$1=$2" >> "$MODPATH/config.conf"
+    fi
+}
+
+# Pick the TTL engine for this phone on every install and update. The self
+# test never touches the real network: it checks the eBPF program in the
+# kernel's test runner and on a throwaway virtual interface pair. The daemon
+# still falls back to NFQUEUE on its own if eBPF fails later.
+ui_print "- Testing the in-kernel (eBPF) TTL engine..."
+if ST="$("$MODPATH/tether_shield" ebpf-selftest 2>&1)"; then
+    set_conf TTL_ENGINE ebpf
+    ui_print "  Works on this phone: TTL is fixed in the kernel (eBPF)"
+else
+    set_conf TTL_ENGINE nfqueue
+    ui_print "  Not available here, using NFQUEUE:"
+    ui_print "  $(echo "$ST" | tail -n 1 | cut -c 1-160)"
+fi
+
 ui_print "- Installing mini config companion app (zero drawer icon)..."
 if [ -f "$MODPATH/HotspotShieldManager.apk" ]; then
     APK="$MODPATH/HotspotShieldManager.apk"

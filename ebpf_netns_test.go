@@ -52,8 +52,6 @@ func testNetns(t *testing.T) *tcNetns {
 	return n
 }
 
-func htons(v uint16) uint16 { return v<<8 | v>>8 }
-
 func packetSocket(t *testing.T, ifindex int, sockType int, proto uint16) int {
 	t.Helper()
 	fd, err := unix.Socket(unix.AF_PACKET, sockType, int(htons(proto)))
@@ -91,7 +89,7 @@ var testMarker = []byte{0xde, 0xad, 0xbe, 0xef}
 
 // markedIPv4 is a TTL-63 IPv4/UDP packet ending with testMarker.
 func markedIPv4() []byte {
-	p := testIPv4(63, 5, testSrc4)
+	p := probeIPv4(63, 5, testSrc4)
 	copy(p[len(p)-4:], testMarker)
 	return p
 }

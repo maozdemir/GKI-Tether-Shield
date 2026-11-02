@@ -4,7 +4,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"os"
 	"testing"
@@ -12,9 +11,6 @@ import (
 	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
 )
-
-// tcActUnspec is TC_ACT_UNSPEC (-1) as the program's return value.
-const tcActUnspec = 0xffffffff
 
 // loadTestPrograms loads the program or skips when this process may not
 // load BPF (not root / no CAP_BPF).
@@ -29,60 +25,6 @@ func loadTestPrograms(t *testing.T, target uint8) *ttlProgSet {
 	}
 	t.Cleanup(func() { p.Close() })
 	return p
-}
-
-func ipv4Checksum(h []byte) uint16 {
-	var sum uint32
-	for i := 0; i+1 < len(h); i += 2 {
-		sum += uint32(binary.BigEndian.Uint16(h[i:]))
-	}
-	for sum>>16 != 0 {
-		sum = sum&0xffff + sum>>16
-	}
-	return ^uint16(sum)
-}
-
-// testPayload is the UDP header plus payload size of test packets. It keeps
-// packets complete even when the kernel's test runner strips an assumed
-// Ethernet header from a raw-IP packet: newer kernels refuse a truncated IP
-// packet there with EINVAL before running the program.
-const testPayload = 8 + 40
-
-// testIPv4 builds an IPv4/UDP packet with a valid header checksum. ihl is
-// the header length in 32-bit words (5 = no options).
-func testIPv4(ttl uint8, ihl int, src [4]byte) []byte {
-	hlen := ihl * 4
-	p := make([]byte, hlen+testPayload)
-	p[0] = 0x40 | byte(ihl)
-	binary.BigEndian.PutUint16(p[2:], uint16(len(p)))
-	p[8] = ttl
-	p[9] = 17 // UDP
-	copy(p[12:16], src[:])
-	copy(p[16:20], []byte{198, 51, 100, 7})
-	for i := 20; i < hlen; i++ {
-		p[i] = 1 // NOP options
-	}
-	binary.BigEndian.PutUint16(p[10:], ipv4Checksum(p[:hlen]))
-	return p
-}
-
-func testIPv6(hlim uint8, src [16]byte) []byte {
-	p := make([]byte, 40+testPayload)
-	p[0] = 0x60
-	binary.BigEndian.PutUint16(p[4:], testPayload)
-	p[6] = 17
-	p[7] = hlim
-	copy(p[8:24], src[:])
-	p[39] = 1
-	return p
-}
-
-func ethFrame(ethertype uint16, payload []byte) []byte {
-	f := make([]byte, ethHeaderLen, ethHeaderLen+len(payload))
-	copy(f[0:6], []byte{2, 0, 0, 0, 0, 1})
-	copy(f[6:12], []byte{2, 0, 0, 0, 0, 2})
-	binary.BigEndian.PutUint16(f[12:], ethertype)
-	return append(f, payload...)
 }
 
 // run executes prog on data and returns the (possibly rewritten) packet.
@@ -126,7 +68,7 @@ func TestEBPFRewritesIPv4OnEthernet(t *testing.T) {
 		{"TTL 255", 255, 5},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out := run(t, p.eth, ethFrame(0x0800, testIPv4(tc.ttl, tc.ihl, testSrc4)))
+			out := run(t, p.eth, ethFrame(0x0800, probeIPv4(tc.ttl, tc.ihl, testSrc4)))
 			checkIPv4(t, out[ethHeaderLen:], 64)
 		})
 	}
@@ -134,7 +76,7 @@ func TestEBPFRewritesIPv4OnEthernet(t *testing.T) {
 
 func TestEBPFLeavesCorrectTTLAlone(t *testing.T) {
 	p := loadTestPrograms(t, 64)
-	in := ethFrame(0x0800, testIPv4(64, 5, testSrc4))
+	in := ethFrame(0x0800, probeIPv4(64, 5, testSrc4))
 	before, _ := p.counters()
 	out := run(t, p.eth, in)
 	if !bytes.Equal(out, in) {
@@ -150,7 +92,7 @@ func TestEBPFRewritesIPv6HopLimit(t *testing.T) {
 	p := loadTestPrograms(t, 64)
 	src := [16]byte{0x20, 0x01, 0x0d, 0xb8}
 	before, _ := p.counters()
-	out := run(t, p.eth, ethFrame(0x86dd, testIPv6(63, src)))
+	out := run(t, p.eth, ethFrame(0x86dd, probeIPv6(63, src)))
 	if hl := out[ethHeaderLen+7]; hl != 64 {
 		t.Fatalf("hop limit = %d, want 64", hl)
 	}
@@ -165,13 +107,13 @@ func TestEBPFTargetChangesLive(t *testing.T) {
 	if err := p.setTarget(100); err != nil {
 		t.Fatal(err)
 	}
-	out := run(t, p.eth, ethFrame(0x0800, testIPv4(63, 5, testSrc4)))
+	out := run(t, p.eth, ethFrame(0x0800, probeIPv4(63, 5, testSrc4)))
 	checkIPv4(t, out[ethHeaderLen:], 100)
 }
 
 func TestEBPFIgnoresOtherAndBrokenPackets(t *testing.T) {
 	p := loadTestPrograms(t, 64)
-	ipv4 := testIPv4(63, 5, testSrc4)
+	ipv4 := probeIPv4(63, 5, testSrc4)
 	for name, frame := range map[string][]byte{
 		"ARP":                  ethFrame(0x0806, make([]byte, 28)),
 		"truncated IPv4":       ethFrame(0x0800, ipv4[:6]),
@@ -201,11 +143,11 @@ func TestEBPFIgnoresOtherAndBrokenPackets(t *testing.T) {
 func TestEBPFRewritesRawIPPackets(t *testing.T) {
 	p := loadTestPrograms(t, 64)
 
-	ipv4 := testIPv4(63, 5, [4]byte{0x08, 0x00, 0, 1}) // src 8.0.0.1 -> 0x0800
+	ipv4 := probeIPv4(63, 5, [4]byte{0x08, 0x00, 0, 1}) // src 8.0.0.1 -> 0x0800
 	checkIPv4(t, run(t, p.raw, ipv4), 64)
 
 	src6 := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0x86, 0xdd} // bytes 12-13 -> 0x86dd
-	if hl := run(t, p.raw, testIPv6(63, src6))[7]; hl != 64 {
+	if hl := run(t, p.raw, probeIPv6(63, src6))[7]; hl != 64 {
 		t.Fatalf("raw IPv6 hop limit = %d, want 64", hl)
 	}
 }

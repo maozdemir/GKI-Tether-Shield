@@ -63,10 +63,21 @@ if [ -f "$MODPATH/HotspotShieldManager.apk" ]; then
     cmd appops set com.alperozd.hotspotshield SYSTEM_ALERT_WINDOW allow 2>/dev/null
 fi
 
-ui_print "- Initializing service..."
 # v3.5 and earlier kept stats in the shell-writable /data/local/tmp
 rm -f /data/local/tmp/ttlfixer_stats.json
-killall -9 nfqttl tether_shield 2>/dev/null
-nohup sh "$MODPATH/service.sh" </dev/null >/dev/null 2>&1 &
 
-ui_print "- Installation completed successfully!"
+# On an update the installed version's service.sh loop (started at boot)
+# keeps running; starting a second one here would run two loops and two
+# daemons fighting over the same ports. Leave it running until the reboot
+# that applies the update (a disabled module stays off, as its owner chose).
+# Only a fresh install starts right away.
+LIVE_MOD="/data/adb/modules/${MODID:-gki_hotspot_shield}"
+if [ "$LIVE_MOD" != "$MODPATH" ] && [ -d "$LIVE_MOD" ]; then
+    ui_print "- Installation completed! Reboot to apply the update"
+    ui_print "  (the installed version stays as it is until then)."
+else
+    ui_print "- Starting the service..."
+    killall -9 nfqttl tether_shield 2>/dev/null
+    nohup sh "$MODPATH/service.sh" </dev/null >/dev/null 2>&1 &
+    ui_print "- Installation completed successfully!"
+fi

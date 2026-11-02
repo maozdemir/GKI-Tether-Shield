@@ -22,6 +22,30 @@ if [ -f "$OLD_CONF" ] && [ "$OLD_CONF" != "$MODPATH/config.conf" ]; then
     set_perm "$MODPATH/config.conf" 0 0 0644
 fi
 
+# set_conf KEY VALUE: set KEY in the new config.conf, adding it if missing.
+set_conf() {
+    if grep -q "^$1=" "$MODPATH/config.conf"; then
+        sed -i "s/^$1=.*/$1=$2/" "$MODPATH/config.conf"
+    else
+        [ -z "$(tail -c 1 "$MODPATH/config.conf")" ] || echo >> "$MODPATH/config.conf"
+        echo "$1=$2" >> "$MODPATH/config.conf"
+    fi
+}
+
+# Pick the TTL engine for this phone on every install and update. The self
+# test never touches the real network: it checks the eBPF program in the
+# kernel's test runner and on a throwaway virtual interface pair. The daemon
+# still falls back to NFQUEUE on its own if eBPF fails later.
+ui_print "- Testing the in-kernel (eBPF) TTL engine..."
+if ST="$("$MODPATH/tether_shield" ebpf-selftest 2>&1)"; then
+    set_conf TTL_ENGINE ebpf
+    ui_print "  Works on this phone: TTL is fixed in the kernel (eBPF)"
+else
+    set_conf TTL_ENGINE nfqueue
+    ui_print "  Not available here, using NFQUEUE:"
+    ui_print "  $(echo "$ST" | tail -n 1 | cut -c 1-160)"
+fi
+
 ui_print "- Installing mini config companion app (zero drawer icon)..."
 if [ -f "$MODPATH/HotspotShieldManager.apk" ]; then
     APK="$MODPATH/HotspotShieldManager.apk"
@@ -39,10 +63,21 @@ if [ -f "$MODPATH/HotspotShieldManager.apk" ]; then
     cmd appops set com.alperozd.hotspotshield SYSTEM_ALERT_WINDOW allow 2>/dev/null
 fi
 
-ui_print "- Initializing service..."
 # v3.5 and earlier kept stats in the shell-writable /data/local/tmp
 rm -f /data/local/tmp/ttlfixer_stats.json
-killall -9 nfqttl tether_shield 2>/dev/null
-nohup sh "$MODPATH/service.sh" </dev/null >/dev/null 2>&1 &
 
-ui_print "- Installation completed successfully!"
+# On an update the installed version's service.sh loop (started at boot)
+# keeps running; starting a second one here would run two loops and two
+# daemons fighting over the same ports. Leave it running until the reboot
+# that applies the update (a disabled module stays off, as its owner chose).
+# Only a fresh install starts right away.
+LIVE_MOD="/data/adb/modules/${MODID:-gki_hotspot_shield}"
+if [ "$LIVE_MOD" != "$MODPATH" ] && [ -d "$LIVE_MOD" ]; then
+    ui_print "- Installation completed! Reboot to apply the update"
+    ui_print "  (the installed version stays as it is until then)."
+else
+    ui_print "- Starting the service..."
+    killall -9 nfqttl tether_shield 2>/dev/null
+    nohup sh "$MODPATH/service.sh" </dev/null >/dev/null 2>&1 &
+    ui_print "- Installation completed successfully!"
+fi

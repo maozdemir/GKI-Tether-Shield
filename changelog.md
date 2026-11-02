@@ -1,5 +1,10 @@
 # 🛡️ GKI-Tether-Shield Changelog
 
+## Version 4.1
+* **Engine Picked at Install**: Every install and update now tests whether your phone can run the in-kernel (eBPF) TTL engine and switches to it if so, or to NFQUEUE if not. The installer log shows the result and, if eBPF isn't available, why. The test never touches your real network. You can still change the engine afterwards; the next update tests again.
+* **Self-Test Command**: `ttlshield ebpf-selftest` runs the same check at any time (`ok`, or the reason it can't run).
+* **Cleaner Updates**: Installing an update no longer starts a second copy of the service next to the running one (which caused "address already in use" errors until the next reboot). The installed version keeps running until you reboot, and a disabled module stays off.
+
 ## Version 4.0
 * **In-Kernel TTL Engine (eBPF)**: New `TTL_ENGINE=ebpf` option (or the TTL engine switch in the dashboard). A small eBPF program fixes TTL / hop limit inside the kernel on every mobile-data interface, so forwarded traffic no longer makes a round trip through the daemon: faster, and easier on the CPU and battery when sharing a fast connection. Off by default; NFQUEUE stays the default.
 * **Offloaded Hotspot Traffic Covered**: Android's tethering offload sends hotspot packets past iptables, so NFQUEUE never sees them. The eBPF engine fixes their TTL too.

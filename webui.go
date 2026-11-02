@@ -83,6 +83,14 @@ func applyConfigUpdate(base Config, update map[string]any) (Config, error) {
 			*field = parseBoolValue(v)
 		}
 	}
+	if v, ok := update["TTL_ENGINE"]; ok {
+		s, _ := v.(string)
+		engine, valid := parseTTLEngine(s)
+		if !valid {
+			return base, fmt.Errorf("TTL_ENGINE must be %q or %q", ttlEngineNFQueue, ttlEngineEBPF)
+		}
+		next.TtlEngine = engine
+	}
 	if v, ok := update["DOH_PROVIDER"]; ok {
 		name, _ := v.(string)
 		if _, known := lookupDoHProvider(name); !known {
@@ -131,6 +139,7 @@ func handleConfigPost(w http.ResponseWriter, r *http.Request, configPath func() 
 		return
 	}
 	setCfg(next)
+	ttlEngineMgr.apply(next)
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
@@ -160,11 +169,16 @@ func configHandler(configPath func() string, canWrite func(*http.Request) bool) 
 func statsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	c := cfgSnapshot()
+	// In-kernel (eBPF) counts add to the daemon's own NFQUEUE counts.
+	engine, bpf, engineErr := ttlEngineMgr.stats()
 	stats := map[string]any{
-		"total_packets":        atomic.LoadUint64(&totalPackets),
-		"ipv4_packets":         atomic.LoadUint64(&ipv4Packets),
-		"ipv6_packets":         atomic.LoadUint64(&ipv6Packets),
-		"ttl_modified":         atomic.LoadUint64(&ttlModified),
+		"total_packets":        atomic.LoadUint64(&totalPackets) + bpf.IPv4Seen + bpf.IPv6Seen,
+		"ipv4_packets":         atomic.LoadUint64(&ipv4Packets) + bpf.IPv4Seen,
+		"ipv6_packets":         atomic.LoadUint64(&ipv6Packets) + bpf.IPv6Seen,
+		"ttl_modified":         atomic.LoadUint64(&ttlModified) + bpf.IPv4Rewritten + bpf.IPv6Rewritten,
+		"ttl_engine":           engine,
+		"ttl_engine_setting":   c.TtlEngine,
+		"ttl_engine_error":     engineErr,
 		"tcp_split_packets":    atomic.LoadUint64(&tcpSplitPkts),
 		"doh_queries":          atomic.LoadUint64(&dohQueries),
 		"dns_cache_hits":       atomic.LoadUint64(&dnsCacheHits),

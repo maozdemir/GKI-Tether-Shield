@@ -36,6 +36,7 @@ func getWebrootFile() string {
 type Config struct {
 	QueueNum          uint16 `json:"QUEUE_NUM"`
 	TargetTTL         uint8  `json:"TARGET_TTL"`
+	TtlEngine         string `json:"TTL_ENGINE"`
 	TcpSplit          bool   `json:"TCP_SPLIT"`
 	SplitPos          int    `json:"SPLIT_POS"`
 	SplitMode         string `json:"SPLIT_MODE"`
@@ -50,6 +51,7 @@ type Config struct {
 var defaultConfig = Config{
 	QueueNum:          6464,
 	TargetTTL:         64,
+	TtlEngine:         ttlEngineNFQueue,
 	TcpSplit:          true,
 	SplitPos:          2,
 	SplitMode:         splitModeAuto,
@@ -110,6 +112,10 @@ func applyConfigValue(c *Config, k, v string) {
 	case "TARGET_TTL":
 		if val, err := strconv.Atoi(v); err == nil && val > 0 && val <= 255 {
 			c.TargetTTL = uint8(val)
+		}
+	case "TTL_ENGINE":
+		if e, ok := parseTTLEngine(v); ok {
+			c.TtlEngine = e
 		}
 	case "TCP_SPLIT":
 		c.TcpSplit = parseBool(v)
@@ -174,6 +180,7 @@ func reloadConfig() {
 	next := loadConfigFile(getConfigPath(), defaultConfig)
 	next.QueueNum = running
 	setCfg(next)
+	ttlEngineMgr.apply(next)
 }
 
 // saveConfigToFile writes the config atomically (temp file + rename) so a
@@ -181,6 +188,7 @@ func reloadConfig() {
 func saveConfigToFile(path string, c Config) error {
 	content := fmt.Sprintf(`# GKI Hotspot Shield Configuration
 TARGET_TTL=%d
+TTL_ENGINE=%s
 TCP_SPLIT=%t
 SPLIT_POS=%d
 SPLIT_MODE=%s
@@ -191,7 +199,7 @@ TCP_LOW_LATENCY=%t
 DOH_ENABLED=%t
 DOH_PROVIDER=%s
 QUEUE_NUM=%d
-`, c.TargetTTL, c.TcpSplit, c.SplitPos, c.SplitMode, c.BlockQUIC, c.BufferbloatQoS, c.WifiPowerSaveLock, c.TcpLowLatency, c.DohEnabled, c.DohProvider, c.QueueNum)
+`, c.TargetTTL, c.TtlEngine, c.TcpSplit, c.SplitPos, c.SplitMode, c.BlockQUIC, c.BufferbloatQoS, c.WifiPowerSaveLock, c.TcpLowLatency, c.DohEnabled, c.DohProvider, c.QueueNum)
 
 	return writeFileAtomic(path, []byte(content), 0o644)
 }

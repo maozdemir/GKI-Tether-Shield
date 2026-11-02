@@ -159,6 +159,16 @@ start_daemon() {
 killall -9 tether_shield 2>/dev/null
 # New web UI token every boot (the daemon reuses it across watchdog restarts).
 rm -f "$MODDIR/.webui_token"
+# The daemon writes which TTL engine is running (nfqueue / ebpf) to
+# $MODDIR/ttl_engine. Until it reports eBPF, the full NFQUEUE rules apply.
+TTL_ENGINE_FILE="$MODDIR/ttl_engine"
+rm -f "$TTL_ENGINE_FILE"
+TTL_ENGINE_ACTIVE=nfqueue
+read_ttl_engine() {
+    engine=nfqueue
+    [ -f "$TTL_ENGINE_FILE" ] && read -r engine < "$TTL_ENGINE_FILE"
+    [ "$engine" = ebpf ] || engine=nfqueue
+}
 setup_dns_rules
 start_daemon
 
@@ -207,6 +217,14 @@ setup_queue_rules() {
         -m connbytes --connbytes-dir original --connbytes-mode packets --connbytes 1:6 \
         -j NFQUEUE $QUEUE_TARGET 2>/dev/null ||
         ip6tables -t mangle -I $CHAIN 1 -p tcp -m multiport --dports 80,443 -j NFQUEUE $QUEUE_TARGET
+
+    # With the eBPF engine active, the kernel rewrites TTL / hop limit itself:
+    # drop the TTL queue rules and keep only the handshake (DPI) rules.
+    if [ "$TTL_ENGINE_ACTIVE" = ebpf ]; then
+        iptables -t mangle -D $CHAIN -m ttl ! --ttl-eq "$TTL" -j NFQUEUE $QUEUE_TARGET 2>/dev/null
+        ip6tables -t mangle -D $CHAIN -m hl ! --hl-eq "$TTL" -j NFQUEUE $QUEUE_TARGET 2>/dev/null ||
+            ip6tables -t mangle -D $CHAIN -j NFQUEUE $QUEUE_TARGET 2>/dev/null
+    fi
 
     for ipt in iptables ip6tables; do
         $ipt -t mangle -N $WAN_CHAIN 2>/dev/null
@@ -319,6 +337,14 @@ CONF_STAMP="$MODDIR/.config_applied"
         # crash); restart it so TTL fixing and DNS don't silently stop.
         # At most one restart per tick, so a crash loop can't spin the CPU.
         pidof tether_shield >/dev/null || start_daemon
+
+        # TTL engine switched (eBPF attached, or fell back / turned off):
+        # rebuild the queue rules to match.
+        read_ttl_engine
+        if [ "$engine" != "$TTL_ENGINE_ACTIVE" ]; then
+            TTL_ENGINE_ACTIVE="$engine"
+            setup_queue_rules
+        fi
 
         # config.conf changed (WebUI save or manual edit): keep iptables, the
         # kernel default TTL and the daemon in sync with it.

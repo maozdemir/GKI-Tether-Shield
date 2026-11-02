@@ -1,6 +1,6 @@
 {
-  "version": "v4.0",
-  "versionCode": 400,
-  "zipUrl": "https://github.com/maozdemir/GKI-Tether-Shield/releases/download/v4.0/GKI_Tether_Shield_v4.0.zip",
+  "version": "v4.1",
+  "versionCode": 410,
+  "zipUrl": "https://github.com/maozdemir/GKI-Tether-Shield/releases/download/v4.1/GKI_Tether_Shield_v4.1.zip",
   "changelog": "https://raw.githubusercontent.com/maozdemir/GKI-Tether-Shield/main/changelog.md"
 }

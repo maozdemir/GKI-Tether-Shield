@@ -6,10 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strings"
 
-	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/asm"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -17,19 +14,20 @@ import (
 // The shaper caps one uplink's speed in both directions, SQM style:
 //
 //	upload:   uplink root  -> htb 7451: (one class at the cap) -> fq_codel
-//	download: uplink ingress -> eBPF redirect -> ifb "tshield_ifb"
+//	download: uplink ingress -> matchall + mirred redirect -> ifb "tshield_ifb"
 //	          ifb root     -> htb 7451: (one class at the cap) -> fq_codel
 //
-// The ingress redirect is a 4-instruction eBPF program built at run time
-// (no compiler needed). Our handles are fixed, so we find and remove exactly
-// what we added; deleting our root qdisc gives the link back its default.
+// The redirect is tc's mirred action, not bpf_redirect: cellular links are
+// raw IP (no Ethernet header), and bpf_redirect drops such packets when the
+// target (the ifb) is an Ethernet-type device; mirred hands them over as
+// they are. Our handles are fixed, so we find and remove exactly what we
+// added; deleting our root qdisc gives the link back its default.
 
 const (
 	sqmHandleMajor  = 0x7451
 	sqmLeafMajor    = 0x7452
 	sqmIfbName      = "tshield_ifb"
 	sqmFilterHandle = 0x7452
-	sqmFilterName   = "tshield_sqm"
 	// HTB quantum: at least one GSO super-packet, so a single class never
 	// loops through deficit rounds (and the kernel doesn't warn about the
 	// quantum it would derive from fast rates).
@@ -39,15 +37,14 @@ const (
 )
 
 // sqmFilterPrios: run our redirect first (1). netd attaches its tethering
-// offload program to the same hook; if it took prio 1 with a filter we
-// can't share it with, we go after it (3), which only misses packets netd
-// itself offloads.
+// offload program to the same hook, and filters of different kinds can't
+// share a priority; if netd holds 1, we go after it (3), which only misses
+// packets netd itself offloads.
 var sqmFilterPrios = []uint16{1, 3}
 
 type shaper struct {
 	n        *tcNetns
 	dev, ifb netlink.Link
-	redirect *ebpf.Program
 	ingress  bool   // download shaping attached
 	prio     uint16 // of our ingress filter
 }
@@ -77,11 +74,6 @@ func (s *shaper) setupIngress(downKbit float64) error {
 	if err := s.setupHTB(ifb, downKbit); err != nil {
 		return err
 	}
-	prog, err := loadRedirect(ifb.Attrs().Index)
-	if err != nil {
-		return err
-	}
-	s.redirect = prog
 	if err := ensureClsact(s.n, s.dev); err != nil {
 		return err
 	}
@@ -97,42 +89,21 @@ func (s *shaper) setupIngress(downKbit float64) error {
 	return fmt.Errorf("add ingress redirect: %w", errors.Join(errs...))
 }
 
-func (s *shaper) ingressFilter(prio uint16) *netlink.BpfFilter {
-	f := &netlink.BpfFilter{
-		FilterAttrs: netlink.FilterAttrs{
-			LinkIndex: s.dev.Attrs().Index,
-			Parent:    netlink.HANDLE_MIN_INGRESS,
-			Handle:    netlink.MakeHandle(0, sqmFilterHandle),
-			Protocol:  unix.ETH_P_ALL,
-			Priority:  prio,
-		},
-		Name:         sqmFilterName,
-		DirectAction: true,
+func (s *shaper) ingressFilter(prio uint16) *netlink.MatchAll {
+	return &netlink.MatchAll{
+		FilterAttrs: sqmFilterAttrs(s.dev, prio),
+		Actions:     []netlink.Action{netlink.NewMirredAction(s.ifb.Attrs().Index)},
 	}
-	if s.redirect != nil {
-		f.Fd = s.redirect.FD()
-	}
-	return f
 }
 
-// loadRedirect builds "return bpf_redirect(ifindex, 0)": every packet goes to
-// the ifb's egress, which shapes it and hands it back to the stack.
-func loadRedirect(ifindex int) (*ebpf.Program, error) {
-	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
-		Name: "tshield_sqm",
-		Type: ebpf.SchedCLS,
-		Instructions: asm.Instructions{
-			asm.Mov.Imm(asm.R1, int32(ifindex)),
-			asm.Mov.Imm(asm.R2, 0),
-			asm.FnRedirect.Call(),
-			asm.Return(),
-		},
-		License: "GPL",
-	})
-	if err != nil {
-		return nil, fmt.Errorf("load ingress redirect program: %w", err)
+func sqmFilterAttrs(dev netlink.Link, prio uint16) netlink.FilterAttrs {
+	return netlink.FilterAttrs{
+		LinkIndex: dev.Attrs().Index,
+		Parent:    netlink.HANDLE_MIN_INGRESS,
+		Handle:    netlink.MakeHandle(0, sqmFilterHandle),
+		Protocol:  unix.ETH_P_ALL,
+		Priority:  prio,
 	}
-	return prog, nil
 }
 
 func ensureIfb(n *tcNetns) (netlink.Link, error) {
@@ -226,43 +197,37 @@ func hasSQMRoot(n *tcNetns, l netlink.Link) bool {
 	return false
 }
 
+// sqmFilterPrio finds our redirect among ingress filters.
+func sqmFilterPrio(filters []netlink.Filter) (uint16, bool) {
+	for _, f := range filters {
+		if _, ok := f.(*netlink.MatchAll); ok && f.Attrs().Handle == netlink.MakeHandle(0, sqmFilterHandle) {
+			return f.Attrs().Priority, true
+		}
+	}
+	return 0, false
+}
+
 func hasSQMFilter(n *tcNetns, l netlink.Link) bool {
 	filters, err := n.nl.FilterList(l, netlink.HANDLE_MIN_INGRESS)
 	if err != nil {
 		return false
 	}
-	for _, f := range filters {
-		bf, ok := f.(*netlink.BpfFilter)
-		if ok && f.Attrs().Handle == netlink.MakeHandle(0, sqmFilterHandle) && strings.HasPrefix(bf.Name, sqmFilterName) {
-			return true
-		}
-	}
-	return false
+	_, found := sqmFilterPrio(filters)
+	return found
 }
 
 // close removes what we attached: the link gets its default qdisc back.
 func (s *shaper) close() {
 	removeSQM(s.n, s.dev)
-	if s.redirect != nil {
-		s.redirect.Close()
-		s.redirect = nil
-	}
 }
 
 // removeSQM undoes a shaper on dev, whichever daemon attached it, and
 // deletes the ifb. Safe to call when nothing is attached.
 func removeSQM(n *tcNetns, dev netlink.Link) {
 	if dev != nil {
-		for _, prio := range sqmFilterPrios {
-			if hasSQMFilter(n, dev) {
-				f := &netlink.BpfFilter{FilterAttrs: netlink.FilterAttrs{
-					LinkIndex: dev.Attrs().Index,
-					Parent:    netlink.HANDLE_MIN_INGRESS,
-					Handle:    netlink.MakeHandle(0, sqmFilterHandle),
-					Protocol:  unix.ETH_P_ALL,
-					Priority:  prio,
-				}}
-				_ = n.nl.FilterDel(f)
+		if filters, err := n.nl.FilterList(dev, netlink.HANDLE_MIN_INGRESS); err == nil {
+			if prio, found := sqmFilterPrio(filters); found {
+				_ = n.nl.FilterDel(&netlink.MatchAll{FilterAttrs: sqmFilterAttrs(dev, prio)})
 			}
 		}
 		if hasSQMRoot(n, dev) {

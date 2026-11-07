@@ -3,6 +3,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"testing"
 	"time"
 
@@ -204,4 +206,58 @@ func TestSQMPingerMeasuresRTT(t *testing.T) {
 		}
 	}
 	t.Fatal("no echo reply")
+}
+
+// Cellular links are raw IP. Downloads arriving on one must pass the ifb
+// and still reach a local socket (bpf_redirect would drop them).
+func TestSQMShapesDownloadsOnRawIPLink(t *testing.T) {
+	inNewNetns(t)
+	n := testNetns(t)
+	tunFD, tun := openTun(t, "tsqrmnet0")
+	addr, _ := netlink.ParseAddr("10.77.0.1/24")
+	if err := n.nl.AddrAdd(tun, addr); err != nil {
+		t.Fatal(err)
+	}
+	s, err := newShaper(n, tun, 20000, 8000, true)
+	if err != nil {
+		t.Fatalf("newShaper on raw-IP link: %v", err)
+	}
+	defer s.close()
+
+	sock, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(sock)
+	if err := unix.Bind(sock, &unix.SockaddrInet4{Port: 7451, Addr: [4]byte{10, 77, 0, 1}}); err != nil {
+		t.Fatal(err)
+	}
+	tv := unix.NsecToTimeval(int64(2 * time.Second))
+	_ = unix.SetsockoptTimeval(sock, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &tv)
+
+	pkt := probeIPv4(64, 5, [4]byte{10, 77, 0, 2})
+	copy(pkt[16:20], []byte{10, 77, 0, 1})
+	pkt[10], pkt[11] = 0, 0
+	binary.BigEndian.PutUint16(pkt[10:], ipv4Checksum(pkt[:20]))
+	binary.BigEndian.PutUint16(pkt[20:], 40000)        // UDP source port
+	binary.BigEndian.PutUint16(pkt[22:], 7451)         // destination port
+	binary.BigEndian.PutUint16(pkt[24:], probePayload) // UDP length; checksum 0
+	marker := []byte("rawipsqm")
+	copy(pkt[len(pkt)-len(marker):], marker)
+
+	before := ifbTxPackets(t, n)
+	if _, err := unix.Write(tunFD, pkt); err != nil { // arrives on the tun
+		t.Fatalf("inject: %v", err)
+	}
+	buf := make([]byte, 2048)
+	got, err := unix.Read(sock, buf)
+	if err != nil {
+		t.Fatalf("download packet never reached the socket: %v", err)
+	}
+	if !bytes.Contains(buf[:got], marker) {
+		t.Fatalf("unexpected payload %q", buf[:got])
+	}
+	if ifbTxPackets(t, n) == before {
+		t.Fatal("download packet bypassed the ifb")
+	}
 }

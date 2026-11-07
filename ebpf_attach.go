@@ -163,7 +163,8 @@ func (a *tcAttacher) sync() error {
 	attachedAny := false
 	for _, l := range links {
 		attrs := l.Attrs()
-		if attrs.Flags&net.FlagUp == 0 || isDownstreamIface(attrs.Name) {
+		// The SQM ifb carries downloads, not uploads: never fix TTL there.
+		if attrs.Flags&net.FlagUp == 0 || isDownstreamIface(attrs.Name) || attrs.Name == sqmIfbName {
 			continue
 		}
 		present[attrs.Index] = true

@@ -274,3 +274,29 @@ func TestEBPFReplacesStaleFilterFromEarlierDaemon(t *testing.T) {
 		t.Fatal("stale filter from the earlier program was not replaced")
 	}
 }
+
+func TestEBPFAttacherSkipsSQMIfb(t *testing.T) {
+	inNewNetns(t)
+	n := testNetns(t)
+	if err := n.nl.LinkAdd(&netlink.Ifb{LinkAttrs: netlink.LinkAttrs{Name: sqmIfbName}}); err != nil {
+		t.Fatalf("create ifb: %v", err)
+	}
+	ifb, err := n.nl.LinkByName(sqmIfbName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.nl.LinkSetUp(ifb); err != nil {
+		t.Fatal(err)
+	}
+	p, err := loadTTLPrograms(64)
+	if err != nil {
+		t.Skipf("BPF unavailable: %v", err)
+	}
+	defer p.Close()
+	a := newTCAttacher(p, n)
+	_ = a.sync()
+	defer a.close()
+	if hasTTLFilter(n, ifb, nil) {
+		t.Fatal("TTL program attached to the SQM ifb, which carries downloads")
+	}
+}

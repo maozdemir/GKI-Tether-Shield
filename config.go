@@ -42,6 +42,7 @@ type Config struct {
 	SplitMode         string `json:"SPLIT_MODE"`
 	BlockQUIC         bool   `json:"BLOCK_QUIC"`
 	BufferbloatQoS    bool   `json:"BUFFERBLOAT_QOS"`
+	QosAutorate       bool   `json:"QOS_AUTORATE"`
 	WifiPowerSaveLock bool   `json:"WIFI_POWER_SAVE_LOCK"`
 	TcpLowLatency     bool   `json:"TCP_LOW_LATENCY"`
 	DohEnabled        bool   `json:"DOH_ENABLED"`
@@ -57,6 +58,7 @@ var defaultConfig = Config{
 	SplitMode:         splitModeAuto,
 	BlockQUIC:         false,
 	BufferbloatQoS:    true,
+	QosAutorate:       true,
 	WifiPowerSaveLock: true,
 	TcpLowLatency:     true,
 	DohEnabled:        true,
@@ -131,6 +133,8 @@ func applyConfigValue(c *Config, k, v string) {
 		}
 	case "BUFFERBLOAT_QOS":
 		c.BufferbloatQoS = parseBool(v)
+	case "QOS_AUTORATE":
+		c.QosAutorate = parseBool(v)
 	case "WIFI_POWER_SAVE_LOCK":
 		c.WifiPowerSaveLock = parseBool(v)
 	case "TCP_LOW_LATENCY":
@@ -181,6 +185,7 @@ func reloadConfig() {
 	next.QueueNum = running
 	setCfg(next)
 	ttlEngineMgr.apply(next)
+	sqmMgr.apply(next)
 }
 
 // saveConfigToFile writes the config atomically (temp file + rename) so a
@@ -194,12 +199,13 @@ SPLIT_POS=%d
 SPLIT_MODE=%s
 BLOCK_QUIC=%t
 BUFFERBLOAT_QOS=%t
+QOS_AUTORATE=%t
 WIFI_POWER_SAVE_LOCK=%t
 TCP_LOW_LATENCY=%t
 DOH_ENABLED=%t
 DOH_PROVIDER=%s
 QUEUE_NUM=%d
-`, c.TargetTTL, c.TtlEngine, c.TcpSplit, c.SplitPos, c.SplitMode, c.BlockQUIC, c.BufferbloatQoS, c.WifiPowerSaveLock, c.TcpLowLatency, c.DohEnabled, c.DohProvider, c.QueueNum)
+`, c.TargetTTL, c.TtlEngine, c.TcpSplit, c.SplitPos, c.SplitMode, c.BlockQUIC, c.BufferbloatQoS, c.QosAutorate, c.WifiPowerSaveLock, c.TcpLowLatency, c.DohEnabled, c.DohProvider, c.QueueNum)
 
 	return writeFileAtomic(path, []byte(content), 0o644)
 }

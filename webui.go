@@ -74,6 +74,7 @@ func applyConfigUpdate(base Config, update map[string]any) (Config, error) {
 		"TCP_SPLIT":            &next.TcpSplit,
 		"BLOCK_QUIC":           &next.BlockQUIC,
 		"BUFFERBLOAT_QOS":      &next.BufferbloatQoS,
+		"QOS_AUTORATE":         &next.QosAutorate,
 		"WIFI_POWER_SAVE_LOCK": &next.WifiPowerSaveLock,
 		"TCP_LOW_LATENCY":      &next.TcpLowLatency,
 		"DOH_ENABLED":          &next.DohEnabled,
@@ -140,6 +141,7 @@ func handleConfigPost(w http.ResponseWriter, r *http.Request, configPath func() 
 	}
 	setCfg(next)
 	ttlEngineMgr.apply(next)
+	sqmMgr.apply(next)
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
@@ -189,6 +191,8 @@ func statsHandler(w http.ResponseWriter, r *http.Request) {
 		"tcp_split_enabled":    c.TcpSplit,
 		"block_quic":           c.BlockQUIC,
 		"bufferbloat_qos":      c.BufferbloatQoS,
+		"qos_autorate":         c.QosAutorate,
+		"sqm":                  sqmMgr.snapshot(),
 		"doh_enabled":          c.DohEnabled,
 		"doh_provider":         c.DohProvider,
 		"version":              moduleVersion,

@@ -262,7 +262,8 @@
 
         <h2 id="network">Network</h2>
         <p class="lede">Speed, lag and battery while you share.</p>
-        <div class="opt"><label for="qosToggle">Fair queueing (fq_codel)</label><input type="checkbox" role="switch" class="switch" id="qosToggle"><span class="hint">Keeps games and calls smooth while someone downloads.</span><details class="more"><summary>What it does</summary><p>When one device downloads or uploads something big, it can hog the connection, and everything else (video calls, games, websites) starts to lag.</p><p>With this on, the shield shares the connection fairly between everything using it, so nothing has to wait in line behind a big download. It works on mobile data all the time, for the phone itself too, and also on the hotspot while it is on. Wi-Fi is left alone. Leave it on.</p></details></div>
+        <div class="opt"><label for="qosToggle">Fair queueing (fq_codel)</label><input type="checkbox" role="switch" class="switch" id="qosToggle"><span class="hint">Keeps games and calls smooth while someone downloads.</span><details class="more"><summary>What it does</summary><p>When one device downloads or uploads something big, it can hog the connection, and everything else (video calls, games, websites) starts to lag.</p><p>With this on, the shield shares the connection fairly between everything using it, so nothing has to wait in line behind a big download. It covers the hotspot while it is on; on mobile data, the auto speed cap below does the real work. Leave it on.</p></details></div>
+        <div class="opt"><label for="autorateToggle">Auto speed cap (SQM autorate)</label><input type="checkbox" role="switch" class="switch" id="autorateToggle"><span class="hint">Stops ping spikes on mobile data, hotspot or not.</span><details class="more"><summary>What it does</summary><p>On mobile data the lag doesn't come from the phone: big downloads pile up in a queue at the cell tower, and the phone's own fair queueing never gets to sort it.</p><p>With this on, the shield caps the speed just below what your connection delivers right now, so the queue forms on the phone instead, where fq_codel keeps it short. It watches ping while the connection is busy and moves the cap up or down every fraction of a second. You may lose a few percent of top speed; in return, games and calls stay smooth during downloads. While idle it sends nothing. Needs fair queueing on.</p></details></div>
         <div class="opt"><label for="batteryGuardToggle">Keep Wi-Fi awake</label><input type="checkbox" role="switch" class="switch" id="batteryGuardToggle"><span class="hint">Stops lag spikes on the hotspot. Uses a little more battery.</span><details class="more"><summary>What it does</summary><p>To save battery, your phone's Wi-Fi takes tiny naps between messages. For devices on your hotspot this causes sudden lag spikes, which you notice most in games and calls.</p><p>With this on, Wi-Fi stays fully awake while the hotspot is on, and goes back to normal when you turn the hotspot off. It uses a little more battery while you share.</p></details></div>
         <div class="opt"><label for="lowLatencyToggle">Low-latency TCP</label><input type="checkbox" role="switch" class="switch" id="lowLatencyToggle"><span class="hint">Makes the phone's own apps a little more responsive.</span><details class="more"><summary>What it does</summary><p>Changes a few hidden phone settings so data is sent right away instead of waiting to collect more, and connections don't slow down after a pause.</p><p>This only affects apps on the phone itself, not the devices on your hotspot. It's safe to leave on. Your phone's original settings come back when you turn it off.</p></details></div>
 
@@ -489,8 +490,18 @@
       setPlanRow('rowQuic', quic ? 'on' : 'off', quic ? 'On' : 'Not included',
         quic ? 'Browsers fall back to TCP, where splitting works' : 'HTTP/3 traffic is not split');
       const qos = !!d.bufferbloat_qos;
-      setPlanRow('rowQos', qos ? 'on' : 'off', qos ? 'On' : 'Not included',
-        qos ? 'Keeps ping low while someone downloads' : 'Queues are left as they are');
+      const sqm = d.sqm || {};
+      const mbit = (k) => (k / 1000).toFixed(k < 10000 ? 1 : 0);
+      if (qos && sqm.active) {
+        setPlanRow('rowQos', 'on', '↓' + mbit(sqm.down_kbit) + ' ↑' + mbit(sqm.up_kbit),
+          'Speed cap in Mbit/s on ' + sqm.iface + (sqm.measuring ? ' · ping +' + sqm.delay_ms + ' ms' : ' · idle') +
+          (sqm.download_shaped ? '' : ' · upload only (CLAT)'));
+      } else if (qos && d.qos_autorate && sqm.error) {
+        setPlanRow('rowQos', 'warn', 'On', 'Auto speed cap failed: ' + sqm.error);
+      } else {
+        setPlanRow('rowQos', qos ? 'on' : 'off', qos ? 'On' : 'Not included',
+          qos ? 'Keeps ping low while someone downloads' : 'Queues are left as they are');
+      }
 
       if (recentFallback) {
         setState('degraded', 'DNS degraded');
@@ -566,7 +577,7 @@
     // --- Settings ---
     const SWITCHES = {
       TCP_SPLIT: 'tcpSplitToggle', BLOCK_QUIC: 'quicToggle', DOH_ENABLED: 'dohToggle',
-      BUFFERBLOAT_QOS: 'qosToggle', WIFI_POWER_SAVE_LOCK: 'batteryGuardToggle', TCP_LOW_LATENCY: 'lowLatencyToggle'
+      BUFFERBLOAT_QOS: 'qosToggle', QOS_AUTORATE: 'autorateToggle', WIFI_POWER_SAVE_LOCK: 'batteryGuardToggle', TCP_LOW_LATENCY: 'lowLatencyToggle'
     };
     const DEFAULT_OFF = new Set(['BLOCK_QUIC']);
     const isOn = (v) => v === true || v === '1' || v === 'true';

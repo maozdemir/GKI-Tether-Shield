@@ -427,10 +427,16 @@ CONF_STAMP="$MODDIR/.config_applied"
         scan_ifaces
         MOBILE_IFACES=""
         [ "$qos" = 1 ] && find_mobile_default
-        state="$active|$qos|$psl|$TETHER_IFACES|$UPSTREAM_IFACES|$MOBILE_IFACES"
+        # The link the daemon shapes (QOS_AUTORATE, sqm_engine.go): its
+        # qdiscs are the daemon's, so this loop never touches them.
+        SQM_IFACE=""
+        [ -f "$MODDIR/sqm_iface" ] && read -r SQM_IFACE < "$MODDIR/sqm_iface"
+        state="$active|$qos|$psl|$TETHER_IFACES|$UPSTREAM_IFACES|$MOBILE_IFACES|$SQM_IFACE"
 
         if [ "$state" != "$applied" ]; then
-            for i in $qos_ifaces; do tc qdisc del dev "$i" root 2>/dev/null; done
+            for i in $qos_ifaces; do
+                [ "$i" = "$SQM_IFACE" ] || tc qdisc del dev "$i" root 2>/dev/null
+            done
             for i in $psl_ifaces; do iw dev "$i" set power_save on 2>/dev/null; done
             qos_ifaces=""
             psl_ifaces=""
@@ -440,6 +446,7 @@ CONF_STAMP="$MODDIR/.config_applied"
                 qos_want="$MOBILE_IFACES"
                 [ "$active" = 1 ] && qos_want="$qos_want $TETHER_IFACES $UPSTREAM_IFACES"
                 for i in $qos_want; do
+                    [ "$i" = "$SQM_IFACE" ] && continue
                     case " $qos_ifaces " in *" $i "*) continue ;; esac
                     qos_attach "$i" && qos_ifaces="$qos_ifaces $i"
                 done

@@ -102,6 +102,7 @@ func main() {
 	}
 	logf("NFQUEUE initialized on queues %d-%d", startCfg.QueueNum, startCfg.QueueNum+NUM_QUEUES-1)
 	ttlEngineMgr.start(*startCfg)
+	sqmMgr.start(*startCfg)
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
@@ -112,6 +113,7 @@ func main() {
 				reloadConfig()
 				continue
 			}
+			sqmMgr.shutdown()
 			ttlEngineMgr.shutdown()
 			closeQueues(queues)
 			os.Exit(0)

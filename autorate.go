@@ -32,9 +32,10 @@ type rateLimits struct {
 
 type autorateConfig struct {
 	down, up rateLimits
-	// delayThreshold is how far above its baseline a delay sample must be
-	// to count as bufferbloat. Cellular delay jitters a lot, hence 30 ms
-	// (round trip; one-way samples use half).
+	// delayThreshold is how far above its baseline a delay sample (round
+	// trip, or each one-way time) must be to count as bufferbloat.
+	// Cellular delay jitters a lot, the upload's especially, hence 30 ms,
+	// as cake-autorate uses per direction.
 	delayThreshold time.Duration
 	// bloatSamples of the last bloatWindow samples must be over the
 	// threshold for a direction to count as bloated.
@@ -176,18 +177,18 @@ func (a *autorate) observeOWD(now time.Time, reflector string, rtt, up, down tim
 	if !r.hasOWD {
 		r.owd, r.hasOWD = [2]float64{d, u}, true
 	}
-	half := ms(a.cfg.delayThreshold) / 2
-	rttDelay := track(&r.rtt, v, ms(a.cfg.delayThreshold))
-	dDelay := track(&r.owd[dirDown], d, half)
-	uDelay := track(&r.owd[dirUp], u, half)
+	thr := ms(a.cfg.delayThreshold)
+	rttDelay := track(&r.rtt, v, thr)
+	dDelay := track(&r.owd[dirDown], d, thr)
+	uDelay := track(&r.owd[dirUp], u, thr)
 	// One way "rose" but the round trip didn't: the phone's clock was
 	// adjusted, not a queue. Start the one-way baselines over.
-	if (dDelay > half || uDelay > half) && rttDelay < half/2 {
+	if (dDelay > thr || uDelay > thr) && rttDelay < thr/2 {
 		r.owd = [2]float64{d, u}
 		dDelay, uDelay = 0, 0
 	}
-	a.record(dirDown, dDelay > half, dDelay)
-	a.record(dirUp, uDelay > half, uDelay)
+	a.record(dirDown, dDelay > thr, dDelay)
+	a.record(dirUp, uDelay > thr, uDelay)
 	a.owd = true
 	a.lastSample, a.lastRTT = now, v
 }

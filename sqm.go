@@ -17,6 +17,12 @@ import (
 //	download: uplink ingress -> matchall + mirred redirect -> ifb "tshield_ifb"
 //	          ifb root     -> htb 7451: (class 1 at the cap) -> fq_codel
 //
+// While shaping, the uplink's GSO (upload) and GRO (download) packet sizes
+// are capped so one aggregated packet takes about sqmAggSeconds to leave at
+// the cap: HTB sends whole packets, and behind a 64 KB one at 4 Mbit/s
+// everything (ACKs, game packets) would wait 130 ms. cake splits GSO
+// packets for the same reason. The original sizes come back on close.
+//
 // Class 2 carries the delay probes (sqm_engine.go's pings), ahead of the
 // bulk class and with its own small rate, so they never wait behind a
 // queued 64 KB GSO/GRO packet: the delay they see is the link's, not the
@@ -43,6 +49,10 @@ const (
 	// sqmProbeKbit is the probe class's own rate: plenty for 10 pings a
 	// second, too little for anyone to hide traffic in.
 	sqmProbeKbit = 2000
+	// sqmAggSeconds: target time for one GSO/GRO packet at the cap.
+	sqmAggSeconds = 0.002
+	sqmAggMin     = 2 * 1500
+	sqmAggMax     = 65536
 )
 
 // sqmProbeClass is the HTB class of delay probes (also their SO_PRIORITY).
@@ -57,14 +67,17 @@ var sqmFilterPrios = []uint16{1, 3}
 type shaper struct {
 	n        *tcNetns
 	dev, ifb netlink.Link
-	ingress  bool   // download shaping attached
+	// The uplink's own GSO/GRO sizes, restored on close, and ours.
+	origGSO, origGRO uint32
+	gso, gro         uint32
+	ingress          bool // download shaping attached
 	prio     uint16 // of our ingress filter
 }
 
 // newShaper shapes dev at the given caps. With ingress false only upload is
 // shaped (used when the downlink can't be redirected safely, e.g. CLAT).
 func newShaper(n *tcNetns, dev netlink.Link, downKbit, upKbit float64, ingress bool) (*shaper, error) {
-	s := &shaper{n: n, dev: dev}
+	s := &shaper{n: n, dev: dev, origGSO: dev.Attrs().GSOMaxSize, origGRO: dev.Attrs().GROMaxSize}
 	if err := s.setupHTB(dev, upKbit); err != nil {
 		return nil, fmt.Errorf("upload shaper on %s: %w", dev.Attrs().Name, err)
 	}
@@ -74,7 +87,33 @@ func newShaper(n *tcNetns, dev netlink.Link, downKbit, upKbit float64, ingress b
 			return nil, fmt.Errorf("download shaper on %s: %w", dev.Attrs().Name, err)
 		}
 	}
+	s.limitAggregation(downKbit, upKbit)
 	return s, nil
+}
+
+// aggSize is the GSO/GRO size for a cap: sqmAggSeconds of it.
+func aggSize(kbit float64) uint32 {
+	return uint32(min(max(kbit*1000/8*sqmAggSeconds, sqmAggMin), sqmAggMax))
+}
+
+// limitAggregation sets the uplink's GSO and GRO sizes for the caps (never
+// above what the link had). Kernels that can't change them just keep
+// theirs: shaping still works, with more delay at low caps.
+func (s *shaper) limitAggregation(downKbit, upKbit float64) {
+	if s.origGSO > 0 {
+		if gso := min(aggSize(upKbit), s.origGSO); gso != s.gso {
+			if err := s.n.nl.LinkSetGSOMaxSize(s.dev, int(gso)); err == nil {
+				s.gso = gso
+			}
+		}
+	}
+	if s.ingress && s.origGRO > 0 {
+		if gro := min(aggSize(downKbit), s.origGRO); gro != s.gro {
+			if err := s.n.nl.LinkSetGROMaxSize(s.dev, int(gro)); err == nil {
+				s.gro = gro
+			}
+		}
+	}
 }
 
 func (s *shaper) setupIngress(downKbit float64) error {
@@ -230,6 +269,7 @@ func (s *shaper) setRates(downKbit, upKbit float64) error {
 			return fmt.Errorf("set download cap: %w", err)
 		}
 	}
+	s.limitAggregation(downKbit, upKbit)
 	return nil
 }
 
@@ -281,6 +321,12 @@ func hasSQMFilter(n *tcNetns, l netlink.Link) bool {
 // close removes what we attached: the link gets its default qdisc back.
 func (s *shaper) close() {
 	removeSQM(s.n, s.dev)
+	if s.gso != 0 {
+		_ = s.n.nl.LinkSetGSOMaxSize(s.dev, int(s.origGSO))
+	}
+	if s.gro != 0 {
+		_ = s.n.nl.LinkSetGROMaxSize(s.dev, int(s.origGRO))
+	}
 }
 
 // removeSQM undoes a shaper on dev, whichever daemon attached it, and

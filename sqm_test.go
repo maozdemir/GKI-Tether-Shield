@@ -331,3 +331,37 @@ func probeClassPackets(t *testing.T, n *tcNetns, l netlink.Link) int64 {
 	}
 	return -1
 }
+
+func TestSQMLimitsAggregationAndRestoresIt(t *testing.T) {
+	inNewNetns(t)
+	n := testNetns(t)
+	dev, _ := sqmVeth(t, n)
+	orig := dev.Attrs().GSOMaxSize
+	s, err := newShaper(n, dev, 20000, 8000, true)
+	if err != nil {
+		t.Fatalf("newShaper: %v", err)
+	}
+	gso := func() uint32 {
+		l, err := n.nl.LinkByName(dev.Attrs().Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return l.Attrs().GSOMaxSize
+	}
+	if s.gso == 0 {
+		t.Skip("kernel can't change gso_max_size")
+	}
+	if got := gso(); got != aggSize(8000) {
+		t.Fatalf("gso_max_size = %d at 8 Mbit/s, want %d", got, aggSize(8000))
+	}
+	if err := s.setRates(20000, 200000); err != nil {
+		t.Fatal(err)
+	}
+	if got := gso(); got != min(aggSize(200000), orig) {
+		t.Fatalf("gso_max_size = %d at 200 Mbit/s, want %d", got, min(aggSize(200000), orig))
+	}
+	s.close()
+	if got := gso(); got != orig {
+		t.Fatalf("gso_max_size = %d after close, want the original %d", got, orig)
+	}
+}

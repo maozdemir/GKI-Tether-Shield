@@ -187,20 +187,23 @@ func newClass(linkIndex int, handle uint32, kbit float64, prio uint32) *netlink.
 // addProbeFilters sends ICMP (IPv4 protocol 1, IPv6 next header 58)
 // arriving on the ifb to the probe class.
 func (s *shaper) addProbeFilters(ifb netlink.Link) error {
+	// One priority per protocol: filters sharing a priority must share
+	// the protocol too.
 	for _, f := range []struct {
+		prio  uint16
 		proto uint16
 		key   netlink.TcU32Key
 	}{
 		// IPv4 word at offset 8: TTL, protocol, checksum.
-		{unix.ETH_P_IP, netlink.TcU32Key{Mask: 0x00ff0000, Val: 0x00010000, Off: 8}},
+		{1, unix.ETH_P_IP, netlink.TcU32Key{Mask: 0x00ff0000, Val: 0x00010000, Off: 8}},
 		// IPv6 word at offset 4: payload length, next header, hop limit.
-		{unix.ETH_P_IPV6, netlink.TcU32Key{Mask: 0x0000ff00, Val: 0x00003a00, Off: 4}},
+		{2, unix.ETH_P_IPV6, netlink.TcU32Key{Mask: 0x0000ff00, Val: 0x00003a00, Off: 4}},
 	} {
 		u := &netlink.U32{
 			FilterAttrs: netlink.FilterAttrs{
 				LinkIndex: ifb.Attrs().Index,
 				Parent:    netlink.MakeHandle(sqmHandleMajor, 0),
-				Priority:  1,
+				Priority:  f.prio,
 				Protocol:  f.proto,
 			},
 			ClassId: sqmProbeClass,

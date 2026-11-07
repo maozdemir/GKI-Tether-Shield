@@ -75,6 +75,11 @@ func TestSQMShaperAttachesShapesAndRemovesCleanly(t *testing.T) {
 	if got := htbRate(t, n, ifb); got != 20000*1000 {
 		t.Fatalf("download cap = %d bit/s, want 20 Mbit/s", got)
 	}
+	for _, l := range []netlink.Link{dev, ifb} {
+		if probeClassPackets(t, n, l) < 0 {
+			t.Fatalf("no probe class on %s", l.Attrs().Name)
+		}
+	}
 
 	// A packet arriving on the uplink goes through the ifb and still
 	// reaches the stack.
@@ -172,7 +177,7 @@ func TestSQMRemoveAllCleansLeftovers(t *testing.T) {
 	}
 }
 
-func TestSQMPingerMeasuresRTT(t *testing.T) {
+func TestSQMPingerMeasuresDelayBothWays(t *testing.T) {
 	inNewNetns(t)
 	n := testNetns(t)
 	lo, err := n.nl.LinkByName("lo")
@@ -187,11 +192,29 @@ func TestSQMPingerMeasuresRTT(t *testing.T) {
 		t.Fatalf("newPinger: %v", err)
 	}
 	defer p.close()
-	p.targets = p.targets[:0]
-	p.targets = append(p.targets, []byte{127, 0, 0, 1})
-	if err := p.send(time.Now()); err != nil {
-		t.Fatalf("send: %v", err)
+	for _, mode := range []string{"timestamp", "echo"} {
+		if mode == "echo" {
+			p.useEcho()
+		}
+		p.setTargets([]string{"127.0.0.1"})
+		if err := p.send(time.Now()); err != nil {
+			t.Fatalf("%s: send: %v", mode, err)
+		}
+		s := pingOnce(t, p)
+		if s.reflector != "127.0.0.1" || s.rtt <= 0 || s.rtt > time.Second {
+			t.Fatalf("%s: bad sample %+v", mode, s)
+		}
+		if s.owd != (mode == "timestamp") {
+			t.Fatalf("%s: one-way = %v", mode, s.owd)
+		}
+		if s.owd && (s.up < -time.Second || s.up > time.Second || s.down < -time.Second || s.down > time.Second) {
+			t.Fatalf("one-way times off on loopback: %+v", s)
+		}
 	}
+}
+
+func pingOnce(t *testing.T, p *pinger) rttSample {
+	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		s, ok, err := p.receive()
@@ -199,13 +222,20 @@ func TestSQMPingerMeasuresRTT(t *testing.T) {
 			t.Fatalf("receive: %v", err)
 		}
 		if ok {
-			if s.reflector != "127.0.0.1" || s.rtt <= 0 || s.rtt > time.Second {
-				t.Fatalf("bad sample %+v", s)
-			}
-			return
+			return s
 		}
 	}
-	t.Fatal("no echo reply")
+	t.Fatal("no reply")
+	return rttSample{}
+}
+
+func TestSQMMsDiffAcrossMidnight(t *testing.T) {
+	if d := msDiff(msPerDay-10, 5); d != 15*time.Millisecond {
+		t.Fatalf("msDiff across midnight = %v, want 15ms", d)
+	}
+	if d := msDiff(5, msPerDay-10); d != -15*time.Millisecond {
+		t.Fatalf("msDiff back across midnight = %v, want -15ms", d)
+	}
 }
 
 // Cellular links are raw IP. Downloads arriving on one must pass the ifb
@@ -260,4 +290,44 @@ func TestSQMShapesDownloadsOnRawIPLink(t *testing.T) {
 	if ifbTxPackets(t, n) == before {
 		t.Fatal("download packet bypassed the ifb")
 	}
+
+	// An ICMP reply (a delay probe) takes the probe class, ahead of bulk.
+	ifb, _ := n.nl.LinkByName(sqmIfbName)
+	probesBefore := probeClassPackets(t, n, ifb)
+	icmp := probeIPv4(64, 5, [4]byte{10, 77, 0, 2})
+	copy(icmp[16:20], []byte{10, 77, 0, 1})
+	icmp[9] = 1 // ICMP
+	icmp[10], icmp[11] = 0, 0
+	binary.BigEndian.PutUint16(icmp[10:], ipv4Checksum(icmp[:20]))
+	icmp[20] = 0 // echo reply
+	if _, err := unix.Write(tunFD, icmp); err != nil {
+		t.Fatalf("inject ICMP: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for probeClassPackets(t, n, ifb) == probesBefore && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if probeClassPackets(t, n, ifb) == probesBefore {
+		t.Fatal("ICMP reply did not take the probe class")
+	}
+}
+
+// probeClassPackets returns the packets sent by l's probe class, or -1 if
+// it has none.
+func probeClassPackets(t *testing.T, n *tcNetns, l netlink.Link) int64 {
+	t.Helper()
+	classes, err := n.nl.ClassList(l, netlink.MakeHandle(sqmHandleMajor, 0))
+	if err != nil {
+		t.Fatalf("list classes: %v", err)
+	}
+	for _, c := range classes {
+		if c.Attrs().Handle != sqmProbeClass {
+			continue
+		}
+		if st := c.Attrs().Statistics; st != nil && st.Basic != nil {
+			return int64(st.Basic.Packets)
+		}
+		return 0
+	}
+	return -1
 }

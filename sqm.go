@@ -13,9 +13,15 @@ import (
 
 // The shaper caps one uplink's speed in both directions, SQM style:
 //
-//	upload:   uplink root  -> htb 7451: (one class at the cap) -> fq_codel
+//	upload:   uplink root  -> htb 7451: (class 1 at the cap) -> fq_codel
 //	download: uplink ingress -> matchall + mirred redirect -> ifb "tshield_ifb"
-//	          ifb root     -> htb 7451: (one class at the cap) -> fq_codel
+//	          ifb root     -> htb 7451: (class 1 at the cap) -> fq_codel
+//
+// Class 2 carries the delay probes (sqm_engine.go's pings), ahead of the
+// bulk class and with its own small rate, so they never wait behind a
+// queued 64 KB GSO/GRO packet: the delay they see is the link's, not the
+// shaper's own. Upload probes reach it through their socket priority,
+// download replies through u32 filters for ICMP on the ifb.
 //
 // The redirect is tc's mirred action, not bpf_redirect: cellular links are
 // raw IP (no Ethernet header), and bpf_redirect drops such packets when the
@@ -34,7 +40,13 @@ const (
 	sqmQuantum = 65536
 	// sqmBurstTime is how much line-rate burst the cap allows.
 	sqmBurstSeconds = 0.004
+	// sqmProbeKbit is the probe class's own rate: plenty for 10 pings a
+	// second, too little for anyone to hide traffic in.
+	sqmProbeKbit = 2000
 )
+
+// sqmProbeClass is the HTB class of delay probes (also their SO_PRIORITY).
+var sqmProbeClass = netlink.MakeHandle(sqmHandleMajor, 2)
 
 // sqmFilterPrios: run our redirect first (1). netd attaches its tethering
 // offload program to the same hook, and filters of different kinds can't
@@ -72,6 +84,9 @@ func (s *shaper) setupIngress(downKbit float64) error {
 	}
 	s.ifb = ifb
 	if err := s.setupHTB(ifb, downKbit); err != nil {
+		return err
+	}
+	if err := s.addProbeFilters(ifb); err != nil {
 		return err
 	}
 	if err := ensureClsact(s.n, s.dev); err != nil {
@@ -137,6 +152,9 @@ func (s *shaper) setupHTB(l netlink.Link, kbit float64) error {
 	if err := s.n.nl.ClassReplace(htbClass(idx, kbit)); err != nil {
 		return fmt.Errorf("add htb class: %w", err)
 	}
+	if err := s.n.nl.ClassReplace(probeClass(idx)); err != nil {
+		return fmt.Errorf("add htb probe class: %w", err)
+	}
 	leaf := netlink.NewFqCodel(netlink.QdiscAttrs{
 		LinkIndex: idx,
 		Handle:    netlink.MakeHandle(sqmLeafMajor, 0),
@@ -149,13 +167,54 @@ func (s *shaper) setupHTB(l netlink.Link, kbit float64) error {
 }
 
 func htbClass(linkIndex int, kbit float64) *netlink.HtbClass {
+	return newClass(linkIndex, netlink.MakeHandle(sqmHandleMajor, 1), kbit, 1)
+}
+
+func probeClass(linkIndex int) *netlink.HtbClass {
+	return newClass(linkIndex, sqmProbeClass, sqmProbeKbit, 0)
+}
+
+func newClass(linkIndex int, handle uint32, kbit float64, prio uint32) *netlink.HtbClass {
 	bits := uint64(math.Max(kbit, 1) * 1000)
 	burst := uint32(math.Max(float64(bits)/8*sqmBurstSeconds, 2*1514))
 	return netlink.NewHtbClass(netlink.ClassAttrs{
 		LinkIndex: linkIndex,
 		Parent:    netlink.MakeHandle(sqmHandleMajor, 0),
-		Handle:    netlink.MakeHandle(sqmHandleMajor, 1),
-	}, netlink.HtbClassAttrs{Rate: bits, Ceil: bits, Buffer: burst, Cbuffer: burst, Quantum: sqmQuantum})
+		Handle:    handle,
+	}, netlink.HtbClassAttrs{Rate: bits, Ceil: bits, Buffer: burst, Cbuffer: burst, Quantum: sqmQuantum, Prio: prio})
+}
+
+// addProbeFilters sends ICMP (IPv4 protocol 1, IPv6 next header 58)
+// arriving on the ifb to the probe class.
+func (s *shaper) addProbeFilters(ifb netlink.Link) error {
+	for _, f := range []struct {
+		proto uint16
+		key   netlink.TcU32Key
+	}{
+		// IPv4 word at offset 8: TTL, protocol, checksum.
+		{unix.ETH_P_IP, netlink.TcU32Key{Mask: 0x00ff0000, Val: 0x00010000, Off: 8}},
+		// IPv6 word at offset 4: payload length, next header, hop limit.
+		{unix.ETH_P_IPV6, netlink.TcU32Key{Mask: 0x0000ff00, Val: 0x00003a00, Off: 4}},
+	} {
+		u := &netlink.U32{
+			FilterAttrs: netlink.FilterAttrs{
+				LinkIndex: ifb.Attrs().Index,
+				Parent:    netlink.MakeHandle(sqmHandleMajor, 0),
+				Priority:  1,
+				Protocol:  f.proto,
+			},
+			ClassId: sqmProbeClass,
+			Sel: &netlink.TcU32Sel{
+				Flags: netlink.TC_U32_TERMINAL,
+				Nkeys: 1,
+				Keys:  []netlink.TcU32Key{f.key},
+			},
+		}
+		if err := s.n.nl.FilterAdd(u); err != nil {
+			return fmt.Errorf("add probe filter: %w", err)
+		}
+	}
+	return nil
 }
 
 // setRates changes the caps in place (no packets are dropped).

@@ -27,6 +27,9 @@ const (
 	sqmUplinkEvery = 2 * time.Second
 	// sqmMinChange: smaller cap changes aren't worth a netlink call.
 	sqmMinChange = 0.01
+	// tsGiveUpAfter: this many unanswered timestamp probes (3 s busy) and
+	// the pinger falls back to round-trip echo requests.
+	tsGiveUpAfter = 30
 )
 
 // sqmIfaceStatusPath tells service.sh which link the daemon shapes, so its
@@ -44,8 +47,10 @@ type sqmStatus struct {
 	RateDown  float64 `json:"rate_down_kbit"` // achieved
 	RateUp    float64 `json:"rate_up_kbit"`
 	Measuring bool    `json:"measuring"`
+	OneWay    bool    `json:"one_way"` // delays measured per direction
 	RTTms     float64 `json:"rtt_ms"`
-	DelayMs   float64 `json:"delay_ms"`
+	DelayMs   float64 `json:"delay_ms"` // download (round trip if !one_way)
+	UpDelayMs float64 `json:"up_delay_ms"`
 	Error     string  `json:"error,omitempty"`
 }
 
@@ -259,6 +264,8 @@ type sqmSession struct {
 	rateUp   float64
 	setDown  float64
 	setUp    float64
+	// Timestamp probes sent and answered, to fall back to echo.
+	tsSent, tsReplies int
 }
 
 func newSQMSession(n *tcNetns, up mobileUplink) (*sqmSession, error) {
@@ -266,7 +273,7 @@ func newSQMSession(n *tcNetns, up mobileUplink) (*sqmSession, error) {
 	// Downloads arriving through CLAT can't be redirected safely: on its
 	// way back from the ifb a packet skips the uplink's ingress programs,
 	// which include CLAT's translation. Upload shaping still applies.
-	sh, err := newShaper(n, up.link, ctl.down, ctl.up, !up.clat)
+	sh, err := newShaper(n, up.link, ctl.down(), ctl.up(), !up.clat)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +285,7 @@ func newSQMSession(n *tcNetns, up mobileUplink) (*sqmSession, error) {
 	s := &sqmSession{
 		name: up.name, sh: sh, ctl: ctl, ping: p,
 		samples: make(chan rttSample, 64),
-		setDown: ctl.down, setUp: ctl.up,
+		setDown: ctl.down(), setUp: ctl.up(),
 	}
 	s.lastRx, s.lastTx = linkBytes(up.name)
 	s.lastAt = time.Now()
@@ -316,7 +323,12 @@ func (s *sqmSession) step(now time.Time) sqmStatus {
 	for drained := false; !drained; {
 		select {
 		case sample := <-s.samples:
-			s.ctl.observe(sample.at, sample.reflector, sample.rtt)
+			if sample.owd {
+				s.tsReplies++
+				s.ctl.observeOWD(sample.at, sample.reflector, sample.rtt, sample.up, sample.down)
+			} else {
+				s.ctl.observe(sample.at, sample.reflector, sample.rtt)
+			}
 		default:
 			drained = true
 		}
@@ -324,6 +336,13 @@ func (s *sqmSession) step(now time.Time) sqmStatus {
 	measuring := s.ctl.active(s.rateDown, s.rateUp)
 	if measuring {
 		_ = s.ping.send(now)
+		if s.ping.usingTimestamps() {
+			s.tsSent++
+			if s.tsSent >= tsGiveUpAfter && s.tsReplies == 0 {
+				s.ping.useEcho()
+				logf("SQM: no reflector answers ICMP timestamps, using round-trip pings")
+			}
+		}
 	}
 	s.ticks++
 	if s.ticks%sqmControlEach == 0 {
@@ -354,8 +373,10 @@ func (s *sqmSession) step(now time.Time) sqmStatus {
 		RateDown:  math.Round(s.rateDown),
 		RateUp:    math.Round(s.rateUp),
 		Measuring: measuring,
+		OneWay:    s.ctl.owd,
 		RTTms:     math.Round(s.ctl.lastRTT*10) / 10,
-		DelayMs:   math.Round(s.ctl.lastDelay*10) / 10,
+		DelayMs:   math.Round(s.ctl.dir[dirDown].lastDelay*10) / 10,
+		UpDelayMs: math.Round(s.ctl.dir[dirUp].lastDelay*10) / 10,
 	}
 }
 

@@ -70,8 +70,8 @@ type shaper struct {
 	// The uplink's own GSO/GRO sizes, restored on close, and ours.
 	origGSO, origGRO uint32
 	gso, gro         uint32
-	ingress          bool // download shaping attached
-	prio     uint16 // of our ingress filter
+	ingress          bool   // download shaping attached
+	prio             uint16 // of our ingress filter
 }
 
 // newShaper shapes dev at the given caps. With ingress false only upload is

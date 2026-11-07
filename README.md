@@ -104,7 +104,9 @@ Lastly, legacy userspace daemons ran a single-threaded queue and modified payloa
 - **Zero Configuration:** Tethered devices require no manual DNS setup.
 
 ### 4. 🎮 Anti-Bufferbloat Fair Queueing (`fq_codel` QoS)
-- Applies Fair Queueing with Controlled Delay (`fq_codel`) on the hotspot interfaces and the actual uplink (taken from Android's tethering NAT rule) while the hotspot is active, and removes it afterwards.
+- Applies Fair Queueing with Controlled Delay (`fq_codel`) on the phone's mobile-data uplink (the interface of its default route) at all times, hotspot on or off, so the phone's own games, calls and downloads get it too.
+- While the hotspot is active, it also covers the hotspot interfaces and the tethering uplink (taken from Android's tethering NAT rule), and removes that again afterwards. Wi-Fi as the phone's own connection is left alone.
+- Multi-queue links (root `mq`) keep their queues and get `fq_codel` on each one, so the modem's per-queue flow control keeps working.
 - Dynamically separates latency-sensitive gaming packets (low-payload UDP) from bulk downloads and 4K video streams, preventing ping spikes under heavy load.
 - Optional low-latency TCP sysctls (`tcp_notsent_lowat=16384`, `tcp_slow_start_after_idle=0`, `tcp_autocorking=0`; original values restored when disabled) and an enlarged `nf_conntrack_max=262144`.
 
@@ -269,8 +271,8 @@ Example output:
   "block_quic": false,
   "doh_enabled": true,
   "doh_provider": "cloudflare",
-  "version": "v4.0",
-  "version_code": 400
+  "version": "v4.2",
+  "version_code": 420
 }
 ```
 `ttl_engine` is the engine actually running; it differs from `ttl_engine_setting` only when eBPF was refused, and `ttl_engine_error` then says why. (Trimmed: the full output also has `bufferbloat_qos`, `dns_last_fallback` and `updated_at`.)

@@ -324,6 +324,43 @@ find_upstreams() {
     set +f
 }
 
+# find_mobile_default: sets MOBILE_IFACES to the interface(s) carrying the
+# phone's own default route (IPv4 and IPv6) when that is mobile data, i.e.
+# not a downstream/Wi-Fi name. Root's unmarked lookups follow the default
+# network, so this is the uplink in use even with the hotspot off.
+find_mobile_default() {
+    MOBILE_IFACES=""
+    for target in 8.8.8.8 2001:4860:4860::8888; do
+        dev=""
+        want=0
+        set -f
+        for word in $(ip route get "$target" 2>/dev/null); do
+            [ "$want" = 1 ] && { dev="$word"; break; }
+            if [ "$word" = "dev" ]; then want=1; else want=0; fi
+        done
+        set +f
+        [ -n "$dev" ] || continue
+        case "$dev" in lo|wlan*|swlan*|ap*|softap*|p2p*|wigig*|rndis*|ncm*|usb*|bt-pan*|eth*) continue ;; esac
+        case " $MOBILE_IFACES " in *" $dev "*) ;; *) MOBILE_IFACES="$MOBILE_IFACES $dev" ;; esac
+    done
+}
+
+# qos_attach IFACE: puts fq_codel on IFACE. A multi-queue link (root "mq")
+# keeps mq and gets fq_codel on each queue, so per-queue flow control (e.g.
+# Qualcomm's per-bearer queues) still works; others get it as the root.
+# Undo is "tc qdisc del dev IFACE root", which restores the kernel default.
+qos_attach() {
+    case "$(tc qdisc show dev "$1" root 2>/dev/null)" in
+        "qdisc mq "*)
+            ok=1
+            for c in $(tc class show dev "$1" 2>/dev/null | sed -n 's/^class mq \([0-9a-f]*:[0-9a-f]*\) .*/\1/p'); do
+                tc qdisc replace dev "$1" parent "$c" fq_codel 2>/dev/null || ok=0
+            done
+            [ "$ok" = 1 ] ;;
+        *) tc qdisc replace dev "$1" root fq_codel 2>/dev/null ;;
+    esac
+}
+
 CONF_STAMP="$MODDIR/.config_applied"
 : > "$CONF_STAMP"
 
@@ -388,19 +425,26 @@ CONF_STAMP="$MODDIR/.config_applied"
         if conf_enabled BUFFERBLOAT_QOS 1; then qos=1; else qos=0; fi
         if conf_enabled WIFI_POWER_SAVE_LOCK 1; then psl=1; else psl=0; fi
         scan_ifaces
-        state="$active|$qos|$psl|$TETHER_IFACES|$UPSTREAM_IFACES"
+        MOBILE_IFACES=""
+        [ "$qos" = 1 ] && find_mobile_default
+        state="$active|$qos|$psl|$TETHER_IFACES|$UPSTREAM_IFACES|$MOBILE_IFACES"
 
         if [ "$state" != "$applied" ]; then
             for i in $qos_ifaces; do tc qdisc del dev "$i" root 2>/dev/null; done
             for i in $psl_ifaces; do iw dev "$i" set power_save on 2>/dev/null; done
             qos_ifaces=""
             psl_ifaces=""
+            if [ "$qos" = 1 ]; then
+                # Mobile data gets fair queueing whether or not the hotspot
+                # is on; hotspot links and the tethering uplink while it is.
+                qos_want="$MOBILE_IFACES"
+                [ "$active" = 1 ] && qos_want="$qos_want $TETHER_IFACES $UPSTREAM_IFACES"
+                for i in $qos_want; do
+                    case " $qos_ifaces " in *" $i "*) continue ;; esac
+                    qos_attach "$i" && qos_ifaces="$qos_ifaces $i"
+                done
+            fi
             if [ "$active" = 1 ]; then
-                if [ "$qos" = 1 ]; then
-                    for i in $TETHER_IFACES $UPSTREAM_IFACES; do
-                        tc qdisc replace dev "$i" root fq_codel 2>/dev/null && qos_ifaces="$qos_ifaces $i"
-                    done
-                fi
                 if [ "$psl" = 1 ]; then
                     for i in $WIFI_IFACES; do
                         iw dev "$i" set power_save off 2>/dev/null && psl_ifaces="$psl_ifaces $i"

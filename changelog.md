@@ -1,5 +1,9 @@
 # 🛡️ GKI-Tether-Shield Changelog
 
+## Version 4.2
+* **Fair Queueing on Mobile Data, Hotspot or Not**: `fq_codel` (Bufferbloat QoS) now runs on the phone's mobile-data connection all the time, not only while the hotspot is on, so games, calls and browsing on the phone itself stay smooth during big downloads. It follows the connection when it changes (e.g. after a reboot or a SIM switch). Wi-Fi as the phone's own connection is left alone.
+* **Safer on Multi-Queue Modems**: On connections with several transmit queues, each queue gets its own `fq_codel` instead of one queue replacing them all, so the modem's flow control keeps working.
+
 ## Version 4.1
 * **Engine Picked at Install**: Every install and update now tests whether your phone can run the in-kernel (eBPF) TTL engine and switches to it if so, or to NFQUEUE if not. The installer log shows the result and, if eBPF isn't available, why. The test never touches your real network. You can still change the engine afterwards; the next update tests again.
 * **Self-Test Command**: `ttlshield ebpf-selftest` runs the same check at any time (`ok`, or the reason it can't run).

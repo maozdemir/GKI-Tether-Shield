@@ -61,6 +61,9 @@ type sqmManager struct {
 	done    chan struct{}
 	status  sqmStatus
 	lastErr string
+	// learned caps per link, so a new session (setting toggled, network
+	// changed and back) starts where the last one left off.
+	learned map[string][2]float64
 }
 
 var sqmMgr = &sqmManager{}
@@ -159,6 +162,7 @@ func (m *sqmManager) run(stop, done chan struct{}) {
 	var sess *sqmSession
 	defer func() {
 		if sess != nil {
+			m.remember(sess.name, sess.setDown, sess.setUp)
 			sess.close()
 		}
 	}()
@@ -193,6 +197,7 @@ func (m *sqmManager) followUplink(n *tcNetns, sess *sqmSession) *sqmSession {
 		if up.name == sess.name {
 			logf("SQM: shaper on %s was removed, re-adding it", sess.name)
 		}
+		m.remember(sess.name, sess.setDown, sess.setUp)
 		sess.close()
 		sess = nil
 	}
@@ -201,7 +206,7 @@ func (m *sqmManager) followUplink(n *tcNetns, sess *sqmSession) *sqmSession {
 		m.clearErr()
 		return nil // Wi-Fi or no network: nothing to shape
 	}
-	s, err := newSQMSession(n, up)
+	s, err := newSQMSession(n, up, m.learnedCaps(up.name))
 	if err != nil {
 		m.fail("%v", err)
 		removeSQM(n, up.link)
@@ -268,8 +273,28 @@ type sqmSession struct {
 	tsSent, tsReplies int
 }
 
-func newSQMSession(n *tcNetns, up mobileUplink) (*sqmSession, error) {
+func (m *sqmManager) learnedCaps(name string) [2]float64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.learned[name]
+}
+
+func (m *sqmManager) remember(name string, down, up float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.learned == nil {
+		m.learned = map[string][2]float64{}
+	}
+	m.learned[name] = [2]float64{down, up}
+}
+
+func newSQMSession(n *tcNetns, up mobileUplink, learned [2]float64) (*sqmSession, error) {
 	ctl := newAutorate(defaultAutorateConfig)
+	for i, r := range learned {
+		if r > 0 {
+			ctl.dir[i].rate = clampRate(r, ctl.dir[i].lim)
+		}
+	}
 	// Downloads arriving through CLAT can't be redirected safely: on its
 	// way back from the ifb a packet skips the uplink's ingress programs,
 	// which include CLAT's translation. Upload shaping still applies.
